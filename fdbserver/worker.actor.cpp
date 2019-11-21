@@ -104,7 +104,7 @@ Error checkIOTimeout(Error const &e) {
 	// Convert all_errors to io_timeout if global timeout bool was set
 	bool timeoutOccurred = (bool)g_network->global(INetwork::enASIOTimedOut);
 	// In simulation, have to check global timed out flag for both this process and the machine process on which IO is done
-	if(g_network->isSimulated() && !timeoutOccurred)
+	if(unlikely(g_network->isSimulated() && !timeoutOccurred))
 		timeoutOccurred = g_pSimulator->getCurrentProcess()->machine->machineProcess->global(INetwork::enASIOTimedOut);
 
 	if(timeoutOccurred) {
@@ -187,7 +187,7 @@ ACTOR Future<Void> workerHandleErrors(FutureStream<ErrorInfo> errors) {
 ACTOR template<class T> Future<Void> zombie(T workerInterface, Future<Void> worker) {
 	try {
 		wait(worker);
-		if (BUGGIFY)
+		if (unlikely(BUGGIFY))
 			wait(delay(1.0));
 		return Void();
 	} catch (Error& e) {
@@ -633,7 +633,7 @@ void startRole(const Role &role, UID roleId, UID workerId, std::map<std::string,
 	g_roles.insert({role.roleName, roleId.shortString()});
 	StringMetricHandle(LiteralStringRef("Roles")) = roleString(g_roles, false);
 	StringMetricHandle(LiteralStringRef("RolesWithIDs")) = roleString(g_roles, true);
-	if (g_network->isSimulated()) g_simulator.addRole(g_network->getLocalAddress(), role.roleName);
+	if (unlikely(g_network->isSimulated())) g_simulator.addRole(g_network->getLocalAddress(), role.roleName);
 }
 
 void endRole(const Role &role, UID id, std::string reason, bool ok, Error e) {
@@ -664,7 +664,7 @@ void endRole(const Role &role, UID id, std::string reason, bool ok, Error e) {
 	g_roles.erase({role.roleName, id.shortString()});
 	StringMetricHandle(LiteralStringRef("Roles")) = roleString(g_roles, false);
 	StringMetricHandle(LiteralStringRef("RolesWithIDs")) = roleString(g_roles, true);
-	if (g_network->isSimulated()) g_simulator.removeRole(g_network->getLocalAddress(), role.roleName);
+	if (unlikely(g_network->isSimulated())) g_simulator.removeRole(g_network->getLocalAddress(), role.roleName);
 
 	if(role.includeInTraceRoles) {
 		removeTraceRole(role.abbreviation);
@@ -978,7 +978,7 @@ ACTOR Future<Void> workerServer(
 					wait( checkFile->sync() );
 				}
 
-				if(g_network->isSimulated()) {
+				if(unlikely(g_network->isSimulated())) {
 					TraceEvent("SimulatedReboot").detail("Deletion", rebootReq.deleteData );
 					if( rebootReq.deleteData ) {
 						throw please_reboot_delete();
@@ -1346,7 +1346,7 @@ ACTOR Future<Void> fileNotFoundToNever(Future<Void> f) {
 
 ACTOR Future<Void> printTimeout() {
 	wait( delay(5) );
-	if( !g_network->isSimulated() ) {
+	if(likely( !g_network->isSimulated() )) {
 		fprintf(stderr, "Warning: FDBD has not joined the cluster after 5 seconds.\n");
 		fprintf(stderr, "  Check configuration and availability using the 'status' command with the fdbcli\n");
 	}
@@ -1375,7 +1375,7 @@ ClusterControllerPriorityInfo getCCPriorityInfo(std::string filePath, ProcessCla
 	ClusterControllerPriorityInfo priorityInfo(ProcessClass::UnsetFit, false, ClusterControllerPriorityInfo::FitnessUnknown);
 	br >> priorityInfo;
 	if (!br.empty()) {
-		if (g_network->isSimulated()) {
+		if (unlikely(g_network->isSimulated())) {
 			ASSERT(false);
 		}
 		else {
@@ -1448,7 +1448,7 @@ ACTOR Future<Void> fdbd(
 
 	try {
 		ServerCoordinators coordinators( connFile );
-		if (g_network->isSimulated()) {
+		if (unlikely(g_network->isSimulated())) {
 			whitelistBinPaths = ",, random_path,  /bin/snap_create.sh,,";
 		}
 		TraceEvent("StartingFDBD").detail("ZoneID", localities.zoneId()).detail("MachineId", localities.machineId()).detail("DiskPath", dataFolder).detail("CoordPath", coordFolder).detail("WhiteListBinPath", whitelistBinPaths);

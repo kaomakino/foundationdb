@@ -243,7 +243,7 @@ struct StatusReply {
 		serializer(ar, statusStr);
 		if( ar.isDeserializing ) {
 			json_spirit::mValue mv;
-			if(g_network->isSimulated()) {
+			if(unlikely(g_network->isSimulated())) {
 				mv = readJSONStrictly(statusStr);
 			}
 			else {

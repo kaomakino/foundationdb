@@ -171,7 +171,7 @@ private:
 	RoleInfo& mutateRoleInfo() {
 		ASSERT(g_network);
 
-		if(g_network->isSimulated()) {
+		if(unlikely(g_network->isSimulated())) {
 			return roleInfoMap[g_network->getLocalAddress()];
 		}
 		
@@ -297,7 +297,7 @@ public:
 		basename = format("%s/%s.%s.%s", directory.c_str(), processName.c_str(), timestamp.c_str(), deterministicRandom()->randomAlphaNumeric(6).c_str());
 		logWriter = Reference<ITraceLogWriter>(new FileTraceLogWriter(directory, processName, basename, formatter->getExtension(), maxLogsSize, [this](){ barriers->triggerAll(); }));
 
-		if ( g_network->isSimulated() )
+		if ( unlikely(g_network->isSimulated()) )
 			writer = Reference<IThreadPool>(new DummyThreadPool());
 		else
 			writer = createGenericThreadPool();
@@ -309,7 +309,7 @@ public:
 		writer->post(a);
 
 		MutexHolder holder(mutex);
-		if(g_network->isSimulated()) {
+		if(unlikely(g_network->isSimulated())) {
 			// We don't support early trace logs in simulation.
 			// This is because we don't know if we're being simulated prior to the network being created, which causes two ambiguities:
 			//
@@ -607,7 +607,7 @@ ThreadFuture<Void> flushTraceFile() {
 }
 
 void flushTraceFileVoid() {
-	if ( g_network && g_network->isSimulated() )
+	if ( unlikely(g_network && g_network->isSimulated()) )
 		flushTraceFile();
 	else {
 		flushTraceFile().getBlocking();
@@ -710,7 +710,7 @@ bool TraceEvent::init() {
 	enabled = enabled && ( !g_network || severity >= FLOW_KNOBS->MIN_TRACE_SEVERITY );
 
 	// Backstop to throttle very spammy trace events
-	if (enabled && g_network && !g_network->isSimulated() && severity > SevDebug && isNetworkThread()) {
+	if (enabled && g_network && likely(!g_network->isSimulated()) && severity > SevDebug && isNetworkThread()) {
 		if (traceEventThrottlerCache->isAboveThreshold(StringRef((uint8_t*)type, strlen(type)))) {
 			enabled = false;
 			TraceEvent(SevWarnAlways, std::string(TRACE_EVENT_THROTTLE_STARTING_TYPE).append(type).c_str()).suppressFor(5);
@@ -744,7 +744,7 @@ bool TraceEvent::init() {
 		detail("Severity", int(severity));
 		detailf("Time", "%.6f", time);
 		detail("Type", type);
-		if(g_network && g_network->isSimulated()) {
+		if(unlikely(g_network && g_network->isSimulated())) {
 			NetworkAddress local = g_network->getLocalAddress();
 			detail("Machine", formatIpPort(local.ip, local.port));
 		}
@@ -994,20 +994,20 @@ TraceInterval& TraceInterval::begin() {
 
 void TraceBatch::addEvent( const char *name, uint64_t id, const char *location ) {
 	eventBatch.push_back( EventInfo(g_trace_clock == TRACE_CLOCK_NOW ? now() : timer(), name, id, location));
-	if( g_network->isSimulated() || FLOW_KNOBS->AUTOMATIC_TRACE_DUMP )
+	if( unlikely(g_network->isSimulated()) || FLOW_KNOBS->AUTOMATIC_TRACE_DUMP )
 		dump();
 }
 
 void TraceBatch::addAttach( const char *name, uint64_t id, uint64_t to ) {
 	attachBatch.push_back( AttachInfo(g_trace_clock == TRACE_CLOCK_NOW ? now() : timer(), name, id, to));
-	if( g_network->isSimulated() || FLOW_KNOBS->AUTOMATIC_TRACE_DUMP )
+	if( unlikely(g_network->isSimulated()) || FLOW_KNOBS->AUTOMATIC_TRACE_DUMP )
 		dump();
 }
 
 void TraceBatch::addBuggify( int activated, int line, std::string file ) {
 	if( g_network ) {
 		buggifyBatch.push_back( BuggifyInfo(g_trace_clock == TRACE_CLOCK_NOW ? now() : timer(), activated, line, file));
-		if( g_network->isSimulated() || FLOW_KNOBS->AUTOMATIC_TRACE_DUMP )
+		if( unlikely(g_network->isSimulated()) || FLOW_KNOBS->AUTOMATIC_TRACE_DUMP )
 			dump();
 	} else {
 		buggifyBatch.push_back( BuggifyInfo(0, activated, line, file));
@@ -1018,27 +1018,27 @@ void TraceBatch::dump() {
 	if (!g_traceLog.isOpen())
 		return;
 	std::string machine;
-	if(g_network->isSimulated()) {
+	if(unlikely(g_network->isSimulated())) {
 		NetworkAddress local = g_network->getLocalAddress();
 		machine = formatIpPort(local.ip, local.port);
 	}
 
 	for(int i = 0; i < attachBatch.size(); i++) {
-		if(g_network->isSimulated()) {
+		if(unlikely(g_network->isSimulated())) {
 			attachBatch[i].fields.addField("Machine", machine);
 		}
 		g_traceLog.writeEvent(attachBatch[i].fields, "", false);
 	}
 
 	for(int i = 0; i < eventBatch.size(); i++) {
-		if(g_network->isSimulated()) {
+		if(unlikely(g_network->isSimulated())) {
 			eventBatch[i].fields.addField("Machine", machine);
 		}
 		g_traceLog.writeEvent(eventBatch[i].fields, "", false);
 	}
 
 	for(int i = 0; i < buggifyBatch.size(); i++) {
-		if(g_network->isSimulated()) {
+		if(unlikely(g_network->isSimulated())) {
 			buggifyBatch[i].fields.addField("Machine", machine);
 		}
 		g_traceLog.writeEvent(buggifyBatch[i].fields, "", false);
@@ -1248,7 +1248,7 @@ bool validateField(const char *key, bool allowUnderscores) {
 }
 
 void TraceEventFields::validateFormat() const {
-	if(g_network && g_network->isSimulated()) {
+	if(unlikely(g_network && g_network->isSimulated())) {
 		for(Field field : fields) {
 			if(!validateField(field.first.c_str(), false)) {
 				fprintf(stderr, "Trace event detail name `%s' is invalid in:\n\t%s\n", field.first.c_str(), toString().c_str());

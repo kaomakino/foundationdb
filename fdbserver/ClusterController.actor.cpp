@@ -2057,7 +2057,7 @@ ACTOR Future<Void> timeKeeper(ClusterControllerData *self) {
 		state Reference<ReadYourWritesTransaction> tr = Reference<ReadYourWritesTransaction>(new ReadYourWritesTransaction(self->cx));
 		loop {
 			try {
-				if(!g_network->isSimulated()) {
+				if(likely(!g_network->isSimulated())) {
 					// This is done to provide an arbitrary logged transaction every ~10s.
 					// FIXME: replace or augment this with logging on the proxy which tracks
 					//       how long it is taking to hear responses from each other component.

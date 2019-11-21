@@ -861,7 +861,7 @@ struct DDTeamCollection : ReferenceCounted<DDTeamCollection> {
 				}
 
 				// Log BestTeamStuck reason when we have healthy teams but they do not have healthy free space
-				if (g_network->isSimulated() && randomTeams.empty() && !self->zeroHealthyTeams->get()) {
+				if (unlikely(g_network->isSimulated() && randomTeams.empty() && !self->zeroHealthyTeams->get())) {
 					TraceEvent(SevWarn, "GetTeamReturnEmpty").detail("HealthyTeams", self->healthyTeamCount);
 				}
 
@@ -1257,7 +1257,7 @@ struct DDTeamCollection : ReferenceCounted<DDTeamCollection> {
 
 		teamInfo->machineTeam = machineTeamInfo;
 		machineTeamInfo->serverTeams.push_back(teamInfo);
-		if (g_network->isSimulated()) {
+		if (unlikely(g_network->isSimulated())) {
 			// Update server team information for consistency check in simulation
 			traceTeamCollectionInfo();
 		}
@@ -2328,7 +2328,7 @@ struct DDTeamCollection : ReferenceCounted<DDTeamCollection> {
 
 		ASSERT_WE_THINK(foundInMachineTeam);
 		team->tracker.cancel();
-		if (g_network->isSimulated()) {
+		if (unlikely(g_network->isSimulated())) {
 			// Update server team information for consistency check in simulation
 			traceTeamCollectionInfo();
 		}
@@ -2767,7 +2767,7 @@ ACTOR Future<Void> serverTeamRemover(DDTeamCollection* self) {
 		}
 
 		double removeServerTeamDelay = SERVER_KNOBS->TR_REMOVE_SERVER_TEAM_DELAY;
-		if (g_network->isSimulated()) {
+		if (unlikely(g_network->isSimulated())) {
 			// Speed up the team remover in simulation; otherwise,
 			// it may time out because we need to remove hundreds of teams
 			removeServerTeamDelay = removeServerTeamDelay / 100;
@@ -3556,7 +3556,7 @@ ACTOR Future<Void> storageServerTracker(
 					    .detail("Address", addr.toString())
 					    .detail("ServerID", server->id);
 					wait(removeKeysFromFailedServer(cx, server->id, self->lock));
-					if (BUGGIFY) wait(delay(5.0));
+					if (unlikely(BUGGIFY)) wait(delay(5.0));
 					self->shardsAffectedByTeamFailure->eraseServer(server->id);
 				}
 			}
@@ -4454,7 +4454,7 @@ ACTOR Future<Void> dataDistribution(Reference<DataDistributorData> self)
 				if (configuration.usableRegions > 1) {
 					teams.push_back(ShardsAffectedByTeamFailure::Team(initData->shards[shard].remoteSrc, false));
 				}
-				if(g_network->isSimulated()) {
+				if(unlikely(g_network->isSimulated())) {
 					TraceEvent("DDInitShard").detail("Keys", keys).detail("PrimarySrc", describe(initData->shards[shard].primarySrc)).detail("RemoteSrc", describe(initData->shards[shard].remoteSrc))
 					.detail("PrimaryDest", describe(initData->shards[shard].primaryDest)).detail("RemoteDest", describe(initData->shards[shard].remoteDest));
 				}

@@ -662,4 +662,16 @@ inline void fdb_probe_actor_enter(const char* name, unsigned long id, int index)
 inline void fdb_probe_actor_exit(const char* name, unsigned long id, int index) {}
 #endif
 
+/* avoid unexpected conflicts with other projects */
+#undef likely
+#undef unlikely
+
+#ifdef __linux__
+#define likely(x)	__builtin_expect(!!(x), 1)
+#define unlikely(x)	__builtin_expect(!!(x), 0)
+#else
+#define likely(X)    !!(X)
+#define unlikely(X)  !!(X)
+#endif
+
 #endif /* FLOW_PLATFORM_H */

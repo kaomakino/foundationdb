@@ -463,7 +463,7 @@ ACTOR Future<Void> connectionKeeper( Reference<Peer> self,
 			} catch (Error& e) {
 				if (e.code() == error_code_connection_failed || e.code() == error_code_actor_cancelled ||
 						e.code() == error_code_connection_unreferenced ||
-						(g_network->isSimulated() && e.code() == error_code_checksum_failed))
+						(unlikely(g_network->isSimulated() && e.code() == error_code_checksum_failed)))
 					self->transport->countConnClosedWithoutError++;
 				else
 					self->transport->countConnClosedWithError++;
@@ -481,7 +481,7 @@ ACTOR Future<Void> connectionKeeper( Reference<Peer> self,
 			reader = Future<Void>();
 			bool ok = e.code() == error_code_connection_failed || e.code() == error_code_actor_cancelled ||
 								e.code() == error_code_connection_unreferenced || e.code() == error_code_connection_idle ||
-								(g_network->isSimulated() && e.code() == error_code_checksum_failed);
+								(unlikely(g_network->isSimulated() && e.code() == error_code_checksum_failed));
 
 			if(self->compatible) {
 				TraceEvent(ok ? SevInfo : SevWarnAlways, "ConnectionClosed", conn ? conn->getDebugID() : UID())
@@ -695,7 +695,7 @@ static void scanPackets(TransportData* transport, uint8_t*& unprocessed_begin, c
 
 		if (checksumEnabled) {
 			bool isBuggifyEnabled = false;
-			if(g_network->isSimulated() && g_network->now() - g_simulator.lastConnectionFailure > g_simulator.connectionFailuresDisableDuration && BUGGIFY_WITH_PROB(0.0001)) {
+			if(unlikely(g_network->isSimulated() && g_network->now() - g_simulator.lastConnectionFailure > g_simulator.connectionFailuresDisableDuration && BUGGIFY_WITH_PROB(0.0001))) {
 				g_simulator.lastConnectionFailure = g_network->now();
 				isBuggifyEnabled = true;
 				TraceEvent(SevInfo, "BitsFlip");
@@ -746,7 +746,7 @@ static void scanPackets(TransportData* transport, uint8_t*& unprocessed_begin, c
 				.detail("Length", (int)packetLen)
 				.detail("Token", token);
 
-			if(g_network->isSimulated())
+			if(unlikely(g_network->isSimulated()))
 				transport->warnAlwaysForLargePacket = false;
 		}
 
@@ -1227,7 +1227,7 @@ static ReliablePacket* sendPacket( TransportData* self, Reference<Peer> peer, IS
 			.detail("Token", destination.token)
 			.backtrace();
 
-		if(g_network->isSimulated())
+		if(unlikely(g_network->isSimulated()))
 			self->warnAlwaysForLargePacket = false;
 	}
 

@@ -1323,7 +1323,7 @@ ACTOR Future<Optional<Value>> getValue( Future<Version> version, Key key, Databa
 			startTimeD = now();
 			++cx->transactionPhysicalReads;
 
-			if (CLIENT_BUGGIFY) {
+			if (unlikely(CLIENT_BUGGIFY)) {
 				throw deterministicRandom()->randomChoice(
 					std::vector<Error>{ transaction_too_old(), future_version() });
 			}
@@ -1857,7 +1857,7 @@ ACTOR Future<Standalone<RangeResultRef>> getRange( Database cx, Reference<Transa
 				}
 
 				++cx->transactionPhysicalReads;
-				if (CLIENT_BUGGIFY) {
+				if (unlikely(CLIENT_BUGGIFY)) {
 					throw deterministicRandom()->randomChoice(std::vector<Error>{
 							transaction_too_old(), future_version()
 								});
@@ -1895,7 +1895,7 @@ ACTOR Future<Standalone<RangeResultRef>> getRange( Database cx, Reference<Transa
 					output.readToBegin = readToBegin;
 					output.readThroughEnd = readThroughEnd;
 
-					if( BUGGIFY && limits.hasByteLimit() && output.size() > std::max(1, originalLimits.minRows) ) {
+					if( unlikely(BUGGIFY && limits.hasByteLimit() && output.size() > std::max(1, originalLimits.minRows)) ) {
 						output.more = true;
 						output.resize(output.arena(), deterministicRandom()->randomInt(std::max(1,originalLimits.minRows),output.size()));
 						getRangeFinished(trLogInfo, startTime, originalBegin, originalEnd, snapshot, conflictRange, reverse, output);
@@ -2401,7 +2401,7 @@ double Transaction::getBackoff(int errCode) {
 
 TransactionOptions::TransactionOptions(Database const& cx) {
 	reset(cx);
-	if (BUGGIFY) {
+	if (unlikely(BUGGIFY)) {
 		commitOnFirstProxy = true;
 	}
 }
@@ -2606,7 +2606,7 @@ ACTOR static Future<Void> tryCommit( Database cx, Reference<TransactionLogInfo> 
 	if (info.debugID.present())
 		TraceEvent(interval.begin()).detail( "Parent", info.debugID.get() );
 
-	if(CLIENT_BUGGIFY) {
+	if(unlikely(CLIENT_BUGGIFY)) {
 		throw deterministicRandom()->randomChoice(std::vector<Error>{
 				not_committed(),
 				transaction_too_old(),
@@ -2668,7 +2668,7 @@ ACTOR static Future<Void> tryCommit( Database cx, Reference<TransactionLogInfo> 
 					cx->latencies.addSample(now() - tr->startTime);
 					if (trLogInfo)
 						trLogInfo->addLog(FdbClientLogEvents::EventCommit(startTime, latency, req.transaction.mutations.size(), req.transaction.mutations.expectedSize(), req));
-					if (CLIENT_BUGGIFY) {
+					if (unlikely(CLIENT_BUGGIFY)) {
 						throw commit_unknown_result();
 					}
 					return Void();
@@ -3148,7 +3148,7 @@ Future<Void> Transaction::onError( Error const& e ) {
 		return delay(std::min(CLIENT_KNOBS->FUTURE_VERSION_RETRY_DELAY, maxBackoff), info.taskID);
 	}
 
-	if(g_network->isSimulated() && ++numErrors % 10 == 0)
+	if(unlikely(g_network->isSimulated() && ++numErrors % 10 == 0))
 		TraceEvent(SevWarnAlways, "TransactionTooManyRetries").detail("NumRetries", numErrors);
 
 	return e;

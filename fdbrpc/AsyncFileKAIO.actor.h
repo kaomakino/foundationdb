@@ -153,7 +153,7 @@ public:
 	}
 
 	static void init( Reference<IEventFD> ev, double ioTimeout ) {
-		if( !g_network->isSimulated() ) {
+		if( likely(!g_network->isSimulated()) ) {
 			ctx.countAIOSubmit.init(LiteralStringRef("AsyncFile.CountAIOSubmit"));
 			ctx.countAIOCollect.init(LiteralStringRef("AsyncFile.CountAIOCollect"));
 			ctx.submitMetric.init(LiteralStringRef("AsyncFile.Submit"));
@@ -579,7 +579,7 @@ private:
 
 	explicit AsyncFileKAIO(int fd, int flags, std::string const& filename) : fd(fd), flags(flags), filename(filename), failed(false) {
 
-		if( !g_network->isSimulated() ) {
+		if( likely(!g_network->isSimulated()) ) {
 			countFileLogicalWrites.init(LiteralStringRef("AsyncFile.CountFileLogicalWrites"), filename);
 			countFileLogicalReads.init( LiteralStringRef("AsyncFile.CountFileLogicalReads"), filename);
 			countLogicalWrites.init(LiteralStringRef("AsyncFile.CountLogicalWrites"));
@@ -803,7 +803,7 @@ ACTOR Future<Void> runTestOps(Reference<IAsyncFile> f, int numIterations, int fi
 
 TEST_CASE("/fdbrpc/AsyncFileKAIO/RequestList") {
 	// This test does nothing in simulation because simulation doesn't support AsyncFileKAIO
-	if (!g_network->isSimulated()) {
+	if (likely(!g_network->isSimulated())) {
 		state Reference<IAsyncFile> f;
 		try {
 			Reference<IAsyncFile> f_ = wait(AsyncFileKAIO::open(

@@ -657,7 +657,7 @@ ACTOR Future<Void> readTransactionSystemState( Reference<MasterData> self, Refer
 			self->recoveryTransactionVersion = self->lastEpochEnd + SERVER_KNOBS->MAX_VERSIONS_IN_FLIGHT;
 		}
 
-		if(BUGGIFY) {
+		if(unlikely(BUGGIFY)) {
 			self->recoveryTransactionVersion += deterministicRandom()->randomInt64(0, SERVER_KNOBS->MAX_VERSIONS_IN_FLIGHT);
 		}
 		if ( self->recoveryTransactionVersion < minRequiredCommitVersion ) self->recoveryTransactionVersion = minRequiredCommitVersion;
@@ -821,7 +821,7 @@ ACTOR Future<Void> recoverFrom( Reference<MasterData> self, Reference<ILogSystem
 		.trackLatest("MasterRecoveryState");
 	self->hasConfiguration = false;
 
-	if(BUGGIFY)
+	if(unlikely(BUGGIFY))
 		wait( delay(10.0) );
 
 	Version txsPoppedVersion = wait( poppedTxsVersion );
@@ -922,7 +922,7 @@ ACTOR Future<Void> getVersion(Reference<MasterData> self, GetCommitVersionReques
 		}
 		else {
 			double t1 = now();
-			if(BUGGIFY) {
+			if(unlikely(BUGGIFY)) {
 				t1 = self->lastVersionTime;
 			}
 			rep.prevVersion = self->version;
@@ -1457,7 +1457,7 @@ ACTOR Future<Void> masterServer( MasterInterface mi, Reference<AsyncVar<ServerDB
 				if (!lifetime.isStillValid( db->get().masterLifetime, mi.id()==db->get().master.id() )) {
 					TraceEvent("MasterTerminated", mi.id()).detail("Reason", "LifetimeToken").detail("MyToken", lifetime.toString()).detail("CurrentToken", db->get().masterLifetime.toString());
 					TEST(true);  // Master replaced, dying
-					if (BUGGIFY) wait( delay(5) );
+					if (unlikely(BUGGIFY)) wait( delay(5) );
 					throw worker_removed();
 				}
 			}

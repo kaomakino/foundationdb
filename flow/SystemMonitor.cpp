@@ -184,7 +184,7 @@ SystemStatistics customSystemMonitor(std::string eventName, StatisticsState *sta
 	{
 		static double firstTime = 0.0;
 		if(firstTime == 0.0) firstTime = now();
-		if( now() - firstTime > 10 || g_network->isSimulated() ) {
+		if( now() - firstTime > 10 || unlikely(g_network->isSimulated()) ) {
 			firstTime = now();
 			std::vector< std::pair<std::string, const char*> > typeNames;
 			for( auto i = allocInstr.begin(); i != allocInstr.end(); ++i ) {

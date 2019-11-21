@@ -1535,7 +1535,7 @@ namespace fileBackup {
 
 			// In simulation, use snapshot interval / 5 to ensure multiple dispatches run
 			// Otherwise, use the knob for the number of seconds between snapshot dispatch tasks.
-			if(g_network->isSimulated())
+			if(unlikely(g_network->isSimulated()))
 				nextDispatchVersion = recentReadVersion + CLIENT_KNOBS->CORE_VERSIONSPERSECOND * (snapshotIntervalSeconds / 5.0);
 			else
 				nextDispatchVersion = recentReadVersion + CLIENT_KNOBS->CORE_VERSIONSPERSECOND * CLIENT_KNOBS->BACKUP_SNAPSHOT_DISPATCH_INTERVAL_SEC;

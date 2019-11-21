@@ -731,7 +731,7 @@ void getDiskStatistics(std::string const& directory, uint64_t& currentIOs, uint6
 			disk_stream.ignore( std::numeric_limits<std::streamsize>::max(), '\n');
 	}
 
-	if(!g_network->isSimulated()) TraceEvent(SevWarn, "GetDiskStatisticsDeviceNotFound").detail("Directory", directory);
+	if(likely(!g_network->isSimulated())) TraceEvent(SevWarn, "GetDiskStatisticsDeviceNotFound").detail("Directory", directory);
 }
 
 dev_t getDeviceId(std::string path) {
@@ -1738,7 +1738,7 @@ void atomicReplace( std::string const& path, std::string const& content, bool te
 		if(!ReplaceFile( path.c_str(), tempfilename.c_str(), NULL, NULL, NULL, NULL ))
 			throw io_error();
 	#elif defined(__unixish__)
-		if(!g_network->isSimulated()) {
+		if(likely(!g_network->isSimulated())) {
 			if(fsync( fileno(f) ) != 0)
 				throw io_error();
 		}
@@ -2507,7 +2507,7 @@ extern "C" void criticalError(int exitCode, const char *type, const char *messag
 
 	fprintf(stderr, "ERROR: %s\n", message);
 
-	if (g_network && !g_network->isSimulated())
+	if (g_network && likely(!g_network->isSimulated()))
 	{
 		TraceEvent ev(SevError, type);
 		ev.detail("Message", message);

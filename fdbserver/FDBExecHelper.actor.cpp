@@ -94,7 +94,7 @@ ACTOR Future<int> spawnProcess(std::string binPath, std::vector<std::string> par
 
 	// for async calls in simulator, always delay by a deterinistic amount of time and do the call
 	// synchronously, otherwise the predictability of the simulator breaks
-	if (!isSync && g_network->isSimulated()) {
+	if (unlikely(!isSync && g_network->isSimulated())) {
 		double snapDelay = std::max(maxSimDelayTime - 1, 0.0);
 		// add some randomness
 		snapDelay += deterministicRandom()->random01();
@@ -103,13 +103,13 @@ ACTOR Future<int> spawnProcess(std::string binPath, std::vector<std::string> par
 		wait(delay(snapDelay));
 	}
 
-	if (!isSync && !g_network->isSimulated()) {
+	if (!isSync && likely(!g_network->isSimulated())) {
 		while (c.running() && runTime <= maxWaitTime) {
 			wait(delay(0.1));
 			runTime += 0.1;
 		}
 	} else {
-		if (g_network->isSimulated()) {
+		if (unlikely(g_network->isSimulated())) {
 			// to keep the simulator deterministic, wait till the process exits,
 			// hence giving a large wait time
 			c.wait_for(std::chrono::hours(24));
@@ -146,7 +146,7 @@ ACTOR Future<int> execHelper(ExecCmdValueString* execArg, UID snapUID, std::stri
 	state int err = 0;
 	state Future<int> cmdErr;
 	state double maxWaitTime = SERVER_KNOBS->SNAP_CREATE_MAX_TIMEOUT;
-	if (!g_network->isSimulated()) {
+	if (likely(!g_network->isSimulated())) {
 		// get bin path
 		auto snapBin = execArg->getBinaryPath();
 		std::vector<std::string> paramList;

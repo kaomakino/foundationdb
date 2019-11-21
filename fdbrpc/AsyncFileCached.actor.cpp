@@ -55,7 +55,7 @@ Future<Reference<IAsyncFile>> AsyncFileCached::open_impl( std::string filename, 
 	Reference<EvictablePageCache> pageCache;
 
 	//In a simulated environment, each machine needs its own caches
-	if(g_network->isSimulated()) {
+	if(unlikely(g_network->isSimulated())) {
 		auto cacheItr = simulatorPageCaches.find(g_network->getLocalAddress());
 		if(cacheItr == simulatorPageCaches.end()) {
 			int64_t pageCacheSize4k = (BUGGIFY) ? FLOW_KNOBS->BUGGIFY_SIM_PAGE_CACHE_4K : FLOW_KNOBS->SIM_PAGE_CACHE_4K;

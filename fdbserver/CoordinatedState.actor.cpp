@@ -26,19 +26,19 @@
 #include "flow/actorcompiler.h" // has to be last include
 
 ACTOR Future<GenerationRegReadReply> waitAndSendRead( RequestStream<GenerationRegReadRequest> to, GenerationRegReadRequest req ) {
-	if( SERVER_KNOBS->BUGGIFY_ALL_COORDINATION || BUGGIFY )
+	if( unlikely(SERVER_KNOBS->BUGGIFY_ALL_COORDINATION || BUGGIFY) )
 		wait( delay( SERVER_KNOBS->BUGGIFIED_EVENTUAL_CONSISTENCY*deterministicRandom()->random01() ) );
 	state GenerationRegReadReply reply = wait( retryBrokenPromise( to, req ) );
-	if( SERVER_KNOBS->BUGGIFY_ALL_COORDINATION || BUGGIFY )
+	if( unlikely(SERVER_KNOBS->BUGGIFY_ALL_COORDINATION || BUGGIFY) )
 		wait( delay( SERVER_KNOBS->BUGGIFIED_EVENTUAL_CONSISTENCY*deterministicRandom()->random01() ) );
 	return reply;
 }
 
 ACTOR Future<UniqueGeneration> waitAndSendWrite(RequestStream<GenerationRegWriteRequest> to, GenerationRegWriteRequest req) {
-	if( SERVER_KNOBS->BUGGIFY_ALL_COORDINATION || BUGGIFY )
+	if( unlikely(SERVER_KNOBS->BUGGIFY_ALL_COORDINATION || BUGGIFY) )
 		wait( delay( SERVER_KNOBS->BUGGIFIED_EVENTUAL_CONSISTENCY*deterministicRandom()->random01() ) );
 	state UniqueGeneration reply = wait( retryBrokenPromise( to, req ) );
-	if( SERVER_KNOBS->BUGGIFY_ALL_COORDINATION || BUGGIFY )
+	if( unlikely(SERVER_KNOBS->BUGGIFY_ALL_COORDINATION || BUGGIFY) )
 		wait( delay( SERVER_KNOBS->BUGGIFIED_EVENTUAL_CONSISTENCY*deterministicRandom()->random01() ) );
 	return reply;
 }
@@ -278,7 +278,7 @@ struct MovableCoordinatedStateImpl {
 			when ( wait( nccs.setExclusive( BinaryWriter::toValue( MovableValue( self->lastValue.get(), MovableValue::MovingFrom, self->coordinators.ccf->getConnectionString().toString() ), IncludeVersion() ) ) ) ) {}
 		}
 
-		if (BUGGIFY) wait(delay(5));
+		if (unlikely(BUGGIFY)) wait(delay(5));
 
 		Value oldQuorumState = wait( cs.read() );
 		if ( oldQuorumState != self->lastCSValue.get() ) {
@@ -295,7 +295,7 @@ struct MovableCoordinatedStateImpl {
 	ACTOR static Future<Void> moveTo( MovableCoordinatedStateImpl* self, CoordinatedState* coordinatedState, ClusterConnectionString nc, Value value ) {
 		wait( coordinatedState->setExclusive( BinaryWriter::toValue( MovableValue( value, MovableValue::MaybeTo, nc.toString() ), IncludeVersion() ) ) );
 
-		if (BUGGIFY) wait( delay(5) );
+		if (unlikely(BUGGIFY)) wait( delay(5) );
 
 		// SOMEDAY: If we are worried about someone magically getting the new cluster ID and interfering, do a second cs.setExclusive( encode( ReallyTo, ... ) )
 		TraceEvent("ChangingQuorum").detail("ConnectionString", nc.toString());

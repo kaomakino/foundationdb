@@ -2008,7 +2008,7 @@ void ReadYourWritesTransaction::debugLogRetries(Optional<Error> error) {
 			std::string transactionNameStr = "";
 			if(!transactionDebugInfo->transactionName.empty())
 				transactionNameStr = format(" in transaction '%s'", printable(StringRef(transactionDebugInfo->transactionName)).c_str());
-			if(!g_network->isSimulated()) //Fuzz workload turns this on, but we do not want stderr output in simulation
+			if(likely(!g_network->isSimulated())) //Fuzz workload turns this on, but we do not want stderr output in simulation
 				fprintf(stderr, "fdb WARNING: long transaction (%.2fs elapsed%s, %d retries, %s)\n", elapsed, transactionNameStr.c_str(), retries, committed ? "committed" : error.get().what());
 			{
 				TraceEvent trace = TraceEvent("LongTransaction");

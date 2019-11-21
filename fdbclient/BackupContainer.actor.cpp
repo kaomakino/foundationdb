@@ -341,7 +341,7 @@ public:
 		std::string fileName = format("range,%" PRId64 ",%s,%d", fileVersion, deterministicRandom()->randomUniqueID().toString().c_str(), blockSize);
 
 		// In order to test backward compatibility in simulation, sometimes write to the old path format
-		if(g_network->isSimulated() && deterministicRandom()->coinflip()) {
+		if(unlikely(g_network->isSimulated() && deterministicRandom()->coinflip())) {
 			return writeFile(old_rangeVersionFolderString(fileVersion) + fileName);
 		}
 
@@ -1167,7 +1167,7 @@ public:
 		// Remove trailing slashes on path
 		path.erase(path.find_last_not_of("\\/") + 1);
 
-		if(!g_network->isSimulated() && path != abspath(path)) {
+		if(likely(!g_network->isSimulated()) && path != abspath(path)) {
 			TraceEvent(SevWarn, "BackupContainerLocalDirectory").detail("Description", "Backup path must be absolute (e.g. file:///some/path)").detail("URL", url).detail("Path", path);
 			throw io_error();
 		}
@@ -1186,7 +1186,7 @@ public:
 		// Remove trailing slashes on path
 		path.erase(path.find_last_not_of("\\/") + 1);
 
-		if(!g_network->isSimulated() && path != abspath(path)) {
+		if(likely(!g_network->isSimulated()) && path != abspath(path)) {
 			TraceEvent(SevWarn, "BackupContainerLocalDirectory").detail("Description", "Backup path must be absolute (e.g. file:///some/path)").detail("URL", url).detail("Path", path);
 			throw io_error();
 		}
@@ -1223,7 +1223,7 @@ public:
 		// but only if the source directory is writeable which shouldn't be required for a restore.
 		std::string fullPath = joinPath(m_path, path);
 		#ifndef _WIN32
-		if(g_network->isSimulated()) {
+		if(unlikely(g_network->isSimulated())) {
 			if(!fileExists(fullPath))
 				throw file_not_found();
 			std::string uniquePath = fullPath + "." + deterministicRandom()->randomUniqueID().toString() + ".lnk";
@@ -1237,7 +1237,7 @@ public:
 		#endif
 		Future<Reference<IAsyncFile>> f = IAsyncFileSystem::filesystem()->open(fullPath, flags, 0644);
 
-		if(g_network->isSimulated()) {
+		if(unlikely(g_network->isSimulated())) {
 			int blockSize = 0;
 			// Extract block size from the filename, if present
 			size_t lastComma = path.find_last_of(',');
@@ -1316,7 +1316,7 @@ public:
 		platform::findFilesRecursively(joinPath(m_path, path), files);
 
 		// Remove .lnk files from results, they are a side effect of a backup that was *read* during simulation.  See openFile() above for more info on why they are created.
-		if(g_network->isSimulated())
+		if(unlikely(g_network->isSimulated()))
 			files.erase(std::remove_if(files.begin(), files.end(), [](std::string const &f) { return StringRef(f).endsWith(LiteralStringRef(".lnk")); }), files.end());
 
 		for(auto &f : files) {
@@ -1888,7 +1888,7 @@ ACTOR Future<Void> testBackupContainer(std::string url) {
 }
 
 TEST_CASE("/backup/containers/localdir") {
-	if(g_network->isSimulated())
+	if(unlikely(g_network->isSimulated()))
 		wait(testBackupContainer(format("file://simfdb/backups/%llx", timer_int())));
 	else
 		wait(testBackupContainer(format("file:///private/tmp/fdb_backups/%llx", timer_int())));
@@ -1896,7 +1896,7 @@ TEST_CASE("/backup/containers/localdir") {
 };
 
 TEST_CASE("/backup/containers/url") {
-	if (!g_network->isSimulated()) {
+	if (likely(!g_network->isSimulated())) {
 		const char *url = getenv("FDB_TEST_BACKUP_URL");
 		ASSERT(url != nullptr);
 		wait(testBackupContainer(url));
@@ -1905,7 +1905,7 @@ TEST_CASE("/backup/containers/url") {
 };
 
 TEST_CASE("/backup/containers_list") {
-	if (!g_network->isSimulated()) {
+	if (likely(!g_network->isSimulated())) {
 		state const char *url = getenv("FDB_TEST_BACKUP_URL");
 		ASSERT(url != nullptr);
 		printf("Listing %s\n", url);

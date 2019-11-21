@@ -1958,7 +1958,7 @@ public:
 			throw backup_duplicate();
 		}
 
-		if (!g_network->isSimulated() && !forceAction) {
+		if (likely(!g_network->isSimulated()) && !forceAction) {
 			state StatusObject srcStatus = wait(StatusClient::statusFetcher(backupAgent->taskBucket->src->getConnectionFile()));
 			StatusObject destStatus = wait(StatusClient::statusFetcher(dest->getConnectionFile()));
 			checkAtomicSwitchOverConfig(srcStatus, destStatus, tagName);

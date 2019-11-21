@@ -1611,7 +1611,7 @@ ACTOR Future<Void> tLogPeekMessages( TLogData* self, TLogPeekRequest req, Refere
 }
 
 ACTOR Future<Void> watchDegraded(TLogData* self) {
-	if(g_network->isSimulated() && g_simulator.speedUpSimulation) {
+	if(unlikely(g_network->isSimulated() && g_simulator.speedUpSimulation)) {
 		return Void();
 	}
 	
@@ -1641,7 +1641,7 @@ ACTOR Future<Void> doQueueCommit( TLogData* self, Reference<LogData> logData, st
 
 	state Future<Void> degraded = watchDegraded(self);
 	wait(c);
-	if(g_network->isSimulated() && !g_simulator.speedUpSimulation && BUGGIFY_WITH_PROB(0.0001)) {
+	if(unlikely(g_network->isSimulated() && !g_simulator.speedUpSimulation && BUGGIFY_WITH_PROB(0.0001))) {
 		wait(delay(6.0));
 	}
 	degraded.cancel();
@@ -1867,7 +1867,7 @@ ACTOR Future<Void> rejoinMasters( TLogData* self, TLogInterface tli, DBRecoveryC
 		{
 			TraceEvent("TLogDisplaced", tli.id()).detail("Reason", "DBInfoDoesNotContain").detail("RecoveryCount", recoveryCount).detail("InfRecoveryCount", inf.recoveryCount).detail("RecoveryState", (int)inf.recoveryState)
 				.detail("LogSysConf", describe(inf.logSystemConfig.tLogs)).detail("PriorLogs", describe(inf.priorCommittedLogServers)).detail("OldLogGens", inf.logSystemConfig.oldTLogs.size());
-			if (BUGGIFY) wait( delay( SERVER_KNOBS->BUGGIFY_WORKER_REMOVED_MAX_LAG * deterministicRandom()->random01() ) );
+			if (unlikely(BUGGIFY)) wait( delay( SERVER_KNOBS->BUGGIFY_WORKER_REMOVED_MAX_LAG * deterministicRandom()->random01() ) );
 			throw worker_removed();
 		}
 
@@ -2354,7 +2354,7 @@ ACTOR Future<Void> restorePersistentState( TLogData* self, LocalityData locality
 
 	if (fFormat.get().present() && !persistFormatReadableRange.contains( fFormat.get().get() )) {
 		//FIXME: remove when we no longer need to test upgrades from 4.X releases
-		if(g_network->isSimulated()) {
+		if(unlikely(g_network->isSimulated())) {
 			TraceEvent("ElapsedTime").detail("SimTime", now()).detail("RealTime", 0).detail("RandomUnseed", 0);
 			flushAndExit(0);
 		}
@@ -2478,7 +2478,7 @@ ACTOR Future<Void> restorePersistentState( TLogData* self, LocalityData locality
 	state Future<Void> allRemoved = waitForAll(removed);
 	state UID lastId = UID(1,1); //initialized so it will not compare equal to a default UID
 	state double recoverMemoryLimit = SERVER_KNOBS->TLOG_RECOVER_MEMORY_LIMIT;
-	if (BUGGIFY) recoverMemoryLimit = std::max<double>(
+	if (unlikely(BUGGIFY)) recoverMemoryLimit = std::max<double>(
 			SERVER_KNOBS->BUGGIFY_RECOVER_MEMORY_LIMIT,
 			(double)SERVER_KNOBS->TLOG_SPILL_THRESHOLD);
 

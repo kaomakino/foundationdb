@@ -635,7 +635,7 @@ void updateRate(RatekeeperData* self, RatekeeperLimits* limits) {
 
 	limits->tpsLimit = std::max(limits->tpsLimit, 0.0);
 
-	if(g_network->isSimulated() && g_simulator.speedUpSimulation) {
+	if(unlikely(g_network->isSimulated() && g_simulator.speedUpSimulation)) {
 		limits->tpsLimit = std::max(limits->tpsLimit, 100.0);
 	}
 

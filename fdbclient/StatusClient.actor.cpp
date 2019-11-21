@@ -34,7 +34,7 @@ json_spirit::mValue readJSONStrictly(const std::string &s) {
 	json_spirit::mValue val;
 	std::string::const_iterator i = s.begin();
 	if(!json_spirit::read_range(i, s.end(), val)) {
-		if(g_network->isSimulated()) {
+		if(unlikely(g_network->isSimulated())) {
 			printf("MALFORMED: %s\n", s.c_str());
 		}
 		throw json_malformed();
@@ -43,7 +43,7 @@ json_spirit::mValue readJSONStrictly(const std::string &s) {
 	// Allow trailing whitespace
 	while(i != s.end()) {
 		if(!isspace(*i)) {
-			if(g_network->isSimulated()) {
+			if(unlikely(g_network->isSimulated())) {
 				printf("EXPECTED EOF: %s\n^^^\n%s\n", std::string(s.begin(), i).c_str(), std::string(i, s.end()).c_str());
 			}
 			throw json_eof_expected();

@@ -954,7 +954,7 @@ ACTOR Future<CoordinatorsResult::Type> changeQuorum( Database cx, Reference<IQuo
 
 			state ClusterConnectionString conn( desiredCoordinators, StringRef( newName + ':' + deterministicRandom()->randomAlphaNumeric( 32 ) ) );
 
-			if(g_network->isSimulated()) {
+			if(unlikely(g_network->isSimulated())) {
 				for(int i = 0; i < (desiredCoordinators.size()/2)+1; i++) {
 					auto address = NetworkAddress(desiredCoordinators[i].ip,desiredCoordinators[i].port,true,false);
 					g_simulator.protectedAddresses.insert(address);

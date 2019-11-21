@@ -354,7 +354,7 @@ ACTOR Future<bool> getTeamCollectionValid(Database cx, WorkerInterface dataDistr
 	state bool ret = false;
 	loop {
 		try {
-			if (!g_network->isSimulated()) {
+			if (likely(!g_network->isSimulated())) {
 				return true;
 			}
 
@@ -489,7 +489,7 @@ ACTOR Future<bool> getStorageServersRecruiting( Database cx, WorkerInterface dis
 }
 
 ACTOR Future<Void> repairDeadDatacenter(Database cx, Reference<AsyncVar<ServerDBInfo>> dbInfo, std::string context) {
-	if(g_network->isSimulated() && g_simulator.usableRegions > 1) {
+	if(unlikely(g_network->isSimulated() && g_simulator.usableRegions > 1)) {
 		bool primaryDead = g_simulator.datacenterDead(g_simulator.primaryDcId);
 		bool remoteDead = g_simulator.datacenterDead(g_simulator.remoteDcId);
 
@@ -525,7 +525,7 @@ ACTOR Future<Void> waitForQuietDatabase( Database cx, Reference<AsyncVar<ServerD
 	TraceEvent(("QuietDatabase" + phase + "Begin").c_str());
 
 	//In a simulated environment, wait 5 seconds so that workers can move to their optimal locations
-	if(g_network->isSimulated())
+	if(unlikely(g_network->isSimulated()))
 		wait(delay(5.0));
 
 	//Require 3 consecutive successful quiet database checks spaced 2 second apart

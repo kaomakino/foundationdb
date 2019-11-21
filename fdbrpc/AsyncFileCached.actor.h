@@ -289,7 +289,7 @@ private:
 
 	AsyncFileCached( Reference<IAsyncFile> uncached, const std::string& filename, int64_t length, Reference<EvictablePageCache> pageCache )
 		: uncached(uncached), filename(filename), length(length), prevLength(length), pageCache(pageCache), currentTruncate(Void()), currentTruncateSize(0) {
-		if( !g_network->isSimulated() ) {
+		if( likely(!g_network->isSimulated()) ) {
 			countFileCacheWrites.init(LiteralStringRef("AsyncFile.CountFileCacheWrites"), filename);
 			countFileCacheReads.init(LiteralStringRef("AsyncFile.CountFileCacheReads"), filename);
 			countFileCacheWritesBlocked.init(LiteralStringRef("AsyncFile.CountFileCacheWritesBlocked"), filename);

@@ -1145,7 +1145,7 @@ ACTOR Future<Void> dataDistributionRelocator( DDQueueData *self, RelocateData rd
 
 // Move a random shard of sourceTeam's to destTeam if sourceTeam has much more data than destTeam
 ACTOR Future<bool> rebalanceTeams( DDQueueData* self, int priority, Reference<IDataDistributionTeam> sourceTeam, Reference<IDataDistributionTeam> destTeam, bool primary ) {
-	if(g_network->isSimulated() && g_simulator.speedUpSimulation) {
+	if(unlikely(g_network->isSimulated() && g_simulator.speedUpSimulation)) {
 		return false;
 	}
 
@@ -1420,7 +1420,7 @@ ACTOR Future<Void> dataDistributionQueue(
 					self.fetchKeysComplete.erase( done );
 					//self.logRelocation( done, "ShardRelocatorDone" );
 					actors.add( tag( delay(0, TaskPriority::DataDistributionLaunch), done.keys, rangesComplete ) );
-					if( g_network->isSimulated() && debug_isCheckRelocationDuration() && now() - done.startTime > 60 ) {
+					if( unlikely(g_network->isSimulated() && debug_isCheckRelocationDuration() && now() - done.startTime > 60) ) {
 						TraceEvent(SevWarnAlways, "RelocationDurationTooLong").detail("Duration", now() - done.startTime);
 						debug_setCheckRelocationDuration(false);
 					}

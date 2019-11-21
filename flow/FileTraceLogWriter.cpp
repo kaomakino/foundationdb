@@ -143,7 +143,7 @@ void FileTraceLogWriter::sync() {
 
 void FileTraceLogWriter::cleanupTraceFiles() {
 	// Setting maxLogsSize=0 disables trace file cleanup based on dir size
-	if(!g_network->isSimulated() && maxLogsSize > 0) {
+	if(likely(!g_network->isSimulated()) && maxLogsSize > 0) {
 		try {
 			std::vector<std::string> existingFiles = platform::listFiles(directory, extension);
 			std::vector<std::string> existingTraceFiles;

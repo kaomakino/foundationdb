@@ -291,7 +291,12 @@
 ** a boolean expression that is usually true.  GCC is able to
 ** use these hints to generate better code, sometimes.
 */
-#if defined(__GNUC__) && 0
+
+/* avoid unexpected conflict with FDB code */
+# undef likely
+# undef unlikely
+
+#if defined(__GNUC__)
 # define likely(X)    __builtin_expect((X),1)
 # define unlikely(X)  __builtin_expect((X),0)
 #else

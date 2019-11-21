@@ -241,7 +241,7 @@ struct SQLiteDB : NonCopyable {
 			// Our exceptions don't propagate through sqlite, so we don't know for sure if the error that caused this was
 			// an injected fault.  Assume that if fault injection is happening, this is an injected fault.
 			Error err = io_error();
-			if (g_network->isSimulated() && (g_simulator.getCurrentProcess()->fault_injection_p1 || g_simulator.getCurrentProcess()->machine->machineProcess->fault_injection_p1 || g_simulator.getCurrentProcess()->rebooting))
+			if (unlikely(g_network->isSimulated() && (g_simulator.getCurrentProcess()->fault_injection_p1 || g_simulator.getCurrentProcess()->machine->machineProcess->fault_injection_p1 || g_simulator.getCurrentProcess()->rebooting)))
 				err = err.asInjectedFault();
 
 			if (db)
@@ -282,7 +282,7 @@ struct SQLiteDB : NonCopyable {
 		int tables[] = {1, table, freetable};
 		TraceEvent("BTreeIntegrityCheckBegin").detail("Filename", filename);
 		char* e = sqlite3BtreeIntegrityCheck(btree, tables, 3, 1000, &errors, verbose);
-		if (!(g_network->isSimulated() && (g_simulator.getCurrentProcess()->fault_injection_p1 || g_simulator.getCurrentProcess()->rebooting))) {
+		if (likely(!(g_network->isSimulated()) && (g_simulator.getCurrentProcess()->fault_injection_p1 || g_simulator.getCurrentProcess()->rebooting))) {
 			TraceEvent((errors||e) ? SevError : SevInfo, "BTreeIntegrityCheckResults").detail("Filename", filename).detail("ErrorTotal", errors);
 			if(e != nullptr) {
 				// e is a string containing 1 or more lines.  Create a separate trace event for each line.
@@ -1340,9 +1340,9 @@ void SQLiteDB::open(bool writable) {
 	checkError("open", result);
 
 	int chunkSize;
-	if( !g_network->isSimulated() ) {
+	if( likely(!g_network->isSimulated()) ) {
 		chunkSize = 4096 * SERVER_KNOBS->SQLITE_CHUNK_SIZE_PAGES;
-	} else if( BUGGIFY ) {
+	} else if( unlikely(BUGGIFY) ) {
 		chunkSize = 4096 * deterministicRandom()->randomInt(0, 100);
 	} else {
 		chunkSize = 4096 * SERVER_KNOBS->SQLITE_CHUNK_SIZE_PAGES_SIM;
@@ -1616,7 +1616,7 @@ private:
 			if (checkIntegrityOnOpen || EXPENSIVE_VALIDATION) {
 				if(conn.check(false) != 0) {
 					// A corrupt btree structure must not be used.
-					if (g_network->isSimulated() && (g_simulator.getCurrentProcess()->fault_injection_p1 || g_simulator.getCurrentProcess()->machine->machineProcess->fault_injection_p1 || g_simulator.getCurrentProcess()->rebooting)) {
+					if (unlikely(g_network->isSimulated() && (g_simulator.getCurrentProcess()->fault_injection_p1 || g_simulator.getCurrentProcess()->machine->machineProcess->fault_injection_p1 || g_simulator.getCurrentProcess()->rebooting))) {
 						throw file_corrupt().asInjectedFault();
 					} else {
 						throw file_corrupt();
@@ -1645,7 +1645,7 @@ private:
 			cursor->set(a.kv);
 			++setsThisCommit;
 			++writesComplete;
-			if (g_network->isSimulated() && g_simulator.getCurrentProcess()->rebooting)
+			if (unlikely(g_network->isSimulated() && g_simulator.getCurrentProcess()->rebooting))
 				TraceEvent("SetActionFinished", dbgid).detail("Elapsed", now()-s);
 		}
 
@@ -1659,7 +1659,7 @@ private:
 			cursor->fastClear(a.range, freeTableEmpty);
 			cursor->clear(a.range);  // TODO: at most one
 			++writesComplete;
-			if (g_network->isSimulated() && g_simulator.getCurrentProcess()->rebooting)
+			if (unlikely(g_network->isSimulated() && g_simulator.getCurrentProcess()->rebooting))
 				TraceEvent("ClearActionFinished", dbgid).detail("Elapsed", now()-s);
 		}
 
@@ -1695,7 +1695,7 @@ private:
 
 			diskBytesUsed = waitForAndGet( conn.dbFile->size() ) + waitForAndGet( conn.walFile->size() );
 
-			if (g_network->isSimulated() && g_simulator.getCurrentProcess()->rebooting)
+			if (unlikely(g_network->isSimulated() && g_simulator.getCurrentProcess()->rebooting))
 				TraceEvent("CommitActionFinished", dbgid).detail("Elapsed", now()-t1);
 		}
 
@@ -1808,7 +1808,7 @@ private:
 
 			a.result.send(workPerformed);
 			++writesComplete;
-			if (g_network->isSimulated() && g_simulator.getCurrentProcess()->rebooting)
+			if (unlikely(g_network->isSimulated() && g_simulator.getCurrentProcess()->rebooting))
 				TraceEvent("SpringCleaningActionFinished", dbgid).detail("Elapsed", now()-s);
 		}
 	};

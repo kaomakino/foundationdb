@@ -142,7 +142,7 @@ struct DBCoreState {
 	template <class Archive>
 	void serialize(Archive& ar) {
 		//FIXME: remove when we no longer need to test upgrades from 4.X releases
-		if(g_network->isSimulated() && !ar.protocolVersion().hasMultiGenerationTLog()) {
+		if(unlikely(g_network->isSimulated() && !ar.protocolVersion().hasMultiGenerationTLog())) {
 			TraceEvent("ElapsedTime").detail("SimTime", now()).detail("RealTime", 0).detail("RandomUnseed", 0);
 			flushAndExit(0);
 		}

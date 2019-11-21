@@ -707,7 +707,7 @@ static int asyncRandomness(sqlite3_vfs *pVfs, int nByte, char *zByte){
 static int asyncSleep(sqlite3_vfs *pVfs, int microseconds){
 	try {
 		Future<Void> simCancel = Never();
-		if( g_network->isSimulated() )
+		if( unlikely(g_network->isSimulated()) )
 			simCancel = success( g_simulator.getCurrentProcess()->shutdownSignal.getFuture() );
 		if( simCancel.isReady() ) {
 			waitFor( delay(FLOW_KNOBS->MAX_BUGGIFIED_DELAY) );

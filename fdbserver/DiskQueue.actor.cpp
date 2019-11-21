@@ -166,9 +166,9 @@ public:
 		fileShrinkBytes(SERVER_KNOBS->DISK_QUEUE_FILE_SHRINK_BYTES), readingBuffer( dbgid ),
 		readyToPush(Void()), fileSizeWarningLimit(fileSizeWarningLimit), lastCommit(Void()), isFirstCommit(true)
 	{
-		if (BUGGIFY)
+		if (unlikely(BUGGIFY))
 			fileExtensionBytes = _PAGE_SIZE * deterministicRandom()->randomSkewedUInt32( 1, 10<<10 );
-		if (BUGGIFY)
+		if (unlikely(BUGGIFY))
 			fileShrinkBytes = _PAGE_SIZE * deterministicRandom()->randomSkewedUInt32( 1, 10<<10 );
 		files[0].dbgFilename = filename(0);
 		files[1].dbgFilename = filename(1);
@@ -866,7 +866,7 @@ public:
 				.detail("NextPageSeq", nextPageSeq)
 				.detail("Details", format("%d pages", pushedPageCount()))
 				.detail("File0Name", rawQueue->files[0].dbgFilename);
-			if(g_network->isSimulated())
+			if(unlikely(g_network->isSimulated()))
 				warnAlwaysForMemory = false;
 		}
 

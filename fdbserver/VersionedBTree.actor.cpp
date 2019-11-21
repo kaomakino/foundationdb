@@ -983,7 +983,7 @@ public:
 				wait(store(self->headerPage, self->readHeaderPage(self, 1)));
 
 				if(!self->headerPage.castTo<Page>()->verifyChecksum(1)) {
-					if(g_network->isSimulated()) {
+					if(unlikely(g_network->isSimulated())) {
 						// TODO: Detect if process is being restarted and only throw injected if so?
 						throw io_error().asInjectedFault();
 					}

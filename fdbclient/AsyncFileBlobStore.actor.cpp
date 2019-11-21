@@ -50,7 +50,7 @@ ACTOR Future<Void> sendStuff(int id, Reference<IRateControl> t, int bytes) {
 
 TEST_CASE("/backup/throttling") {
 	// Test will not work in simulation.
-	if(g_network->isSimulated())
+	if(unlikely(g_network->isSimulated()))
 		return Void();
 
 	state int limit = 100000;

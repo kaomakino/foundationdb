@@ -69,7 +69,7 @@ ACTOR Future<MoveKeysLock> takeMoveKeysLock( Database cx, UID ddId ) {
 			state MoveKeysLock lock;
 			state UID txnId;
 			tr.setOption(FDBTransactionOptions::PRIORITY_SYSTEM_IMMEDIATE);
-			if( !g_network->isSimulated() ) {
+			if( likely(!g_network->isSimulated()) ) {
 				txnId = deterministicRandom()->randomUniqueID();
 				tr.debugTransaction(txnId);
 			}
@@ -481,7 +481,7 @@ ACTOR Future<Void> checkFetchingState( Database cx, vector<UID> dest, KeyRange k
 
 	loop {
 		try {
-			if (BUGGIFY) wait(delay(5));
+			if (unlikely(BUGGIFY)) wait(delay(5));
 
 			tr.info.taskID = TaskPriority::MoveKeys;
 			tr.setOption(FDBTransactionOptions::PRIORITY_SYSTEM_IMMEDIATE);

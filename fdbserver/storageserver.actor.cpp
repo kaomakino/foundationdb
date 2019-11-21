@@ -757,7 +757,7 @@ void validate(StorageServer* data, bool force = false) {
 void
 updateProcessStats(StorageServer* self)
 {
-	if (g_network->isSimulated()) {
+	if (unlikely(g_network->isSimulated())) {
 		// diskUsage and cpuUsage are not relevant in the simulator,
 		// and relying on the actual values could break seed determinism
 		self->cpuUsage = 100.0;
@@ -992,7 +992,7 @@ ACTOR Future<Void> watchValueQ( StorageServer* data, WatchValueRequest req ) {
 		double timeoutDelay = -1;
 		if(data->noRecentUpdates.get()) {
 			timeoutDelay = std::max(CLIENT_KNOBS->FAST_WATCH_TIMEOUT - (now() - startTime), 0.0);
-		} else if(!BUGGIFY) {
+		} else if(likely(!BUGGIFY)) {
 			timeoutDelay = std::max(CLIENT_KNOBS->WATCH_TIMEOUT - (now() - startTime), 0.0);
 		}
 		choose {
@@ -2122,7 +2122,7 @@ ACTOR Future<Void> fetchKeys( StorageServer *data, AddingShard* shard ) {
 
 				this_block = Standalone<RangeResultRef>();
 
-				if (BUGGIFY) wait( delay( 1 ) );
+				if (unlikely(BUGGIFY)) wait( delay( 1 ) );
 
 				break;
 			} catch (Error& e) {
@@ -2876,7 +2876,7 @@ ACTOR Future<Void> update( StorageServer* data, bool* pReceivedUpdate )
 ACTOR Future<Void> updateStorage(StorageServer* data) {
 	loop {
 		ASSERT( data->durableVersion.get() == data->storageVersion() );
-		if (g_network->isSimulated()) {
+		if (unlikely(g_network->isSimulated())) {
 			double endTime = g_simulator.checkDisabled(format("%s/updateStorage", data->thisServerID.toString().c_str()));
 			if(endTime > now()) {
 				wait(delay(endTime - now(), TaskPriority::UpdateStorage));
@@ -3140,7 +3140,7 @@ ACTOR Future<Void> restoreByteSample(StorageServer* data, IKeyValueStore* storag
 	wait( waitForAll( sampleRanges ) );
 	TraceEvent("RecoveredByteSampleChunkedRead", data->thisServerID).detail("Ranges",sampleRanges.size());
 
-	if( BUGGIFY )
+	if( unlikely(BUGGIFY) )
 		wait( delay( deterministicRandom()->random01() * 10.0 ) );
 
 	return Void();
@@ -3768,7 +3768,7 @@ ACTOR Future<Void> replaceInterface( StorageServer* self, StorageServerInterface
 								TraceEvent("SSHistory", self->thisServerID).detail("Ver", it.first).detail("Tag", it.second.toString());
 							}
 
-							if(self->history.size() && BUGGIFY) {
+							if(unlikely(self->history.size() && BUGGIFY)) {
 								TraceEvent("SSHistoryReboot", self->thisServerID);
 								throw please_reboot();
 							}
