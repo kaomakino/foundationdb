@@ -29,7 +29,9 @@
 
 #define NOMINMAX
 
+#ifndef __aarch64__
 #include <nmmintrin.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <random>
@@ -169,6 +171,13 @@ static inline uint32_t shift_crc(uint32_t shift_table[][256], uint32_t crc)
         ^ shift_table[2][(crc >> 16) & 0xff]
         ^ shift_table[3][crc >> 24];
 }
+
+
+#ifdef __aarch64__
+static uint32_t append_hw(uint32_t crc, const uint8_t * buf, size_t len) {
+    return 0;
+}
+#else /* __aarch64__ */
 
 /* Compute CRC-32C using the Intel hardware instruction. */
 #if defined(__clang__) || defined(__GNUG__)
@@ -313,6 +322,7 @@ static uint32_t append_hw(uint32_t crc, const uint8_t * buf, size_t len)
     return static_cast<uint32_t>(crc0) ^ 0xffffffff;
 }
 
+#endif /* __aarch64__ */
 
 static bool hw_available = platform::isSse42Supported();
 

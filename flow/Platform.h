@@ -406,7 +406,13 @@ dev_t getDeviceId(std::string path);
 #endif
 
 #ifdef __linux__
+#ifdef __aarch64__
+inline static void _mm_pause() {
+__asm__ __volatile__ ("yield");
+}
+#else
 #include <x86intrin.h>
+#endif
 #include <features.h>
 #include <sys/stat.h>
 #endif
@@ -420,6 +426,12 @@ inline static uint64_t __rdtsc() {
 	return( lo | (hi << 32) );
 }
 #endif
+#elif defined(__aarch64__)
+inline static uint64_t __rdtsc() {
+  int64_t virtual_timer_value;
+  asm volatile("mrs %0, cntvct_el0" : "=r"(virtual_timer_value));
+  return virtual_timer_value;
+}
 #endif
 
 #ifdef _WIN32
@@ -433,7 +445,9 @@ inline static int64_t interlockedExchangeAdd64(volatile int64_t *a, int64_t b) {
 inline static int64_t interlockedExchange64(volatile int64_t *a, int64_t b) { return _InterlockedExchange64(a, b); }
 inline static int64_t interlockedOr64(volatile int64_t *a, int64_t b) { return _InterlockedOr64(a, b); }
 #elif defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8)
+#ifndef __aarch64__
 #include <xmmintrin.h>
+#endif
 inline static int32_t interlockedIncrement(volatile int32_t *a) { return __sync_add_and_fetch(a, 1); }
 inline static int64_t interlockedIncrement64(volatile int64_t *a) { return __sync_add_and_fetch(a, 1); }
 inline static int32_t interlockedDecrement(volatile int32_t *a) { return __sync_add_and_fetch(a, -1); }
