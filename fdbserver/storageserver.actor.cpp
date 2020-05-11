@@ -626,11 +626,7 @@ public:
 	}
 
 	Future<Void> getLoadBalanceDelay() {
-		if(loadBalanceDelay.isReady() || ++sharedDelayCount > SERVER_KNOBS->MAX_SHARED_LOAD_BALANCE_DELAY) {
-			sharedDelayCount = 0;
-			loadBalanceDelay = delay(0, TaskPriority::DefaultEndpoint);
-		}
-		return loadBalanceDelay;
+	  return delay(0, TaskPriority::DefaultEndpoint);
 	}
 	//~StorageServer() { fclose(log); }
 
