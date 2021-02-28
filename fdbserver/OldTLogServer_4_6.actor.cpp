@@ -19,7 +19,6 @@
  */
 
 #include "flow/Hash3.h"
-#include "flow/Stats.h"
 #include "flow/UnitTest.h"
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbclient/Notified.h"
@@ -33,6 +32,7 @@
 #include "fdbrpc/FailureMonitor.h"
 #include "fdbserver/IDiskQueue.h"
 #include "fdbrpc/sim_validation.h"
+#include "fdbrpc/Stats.h"
 #include "fdbserver/ServerDBInfo.h"
 #include "fdbserver/LogSystem.h"
 #include "fdbserver/WaitFailure.h"
@@ -131,7 +131,7 @@ namespace oldTLog_4_6 {
 		void push( TLogQueueEntryRef const& qe ) {
 			BinaryWriter wr( Unversioned() );  // outer framing is not versioned
 			wr << uint32_t(0);
-			IncludeVersion().write(wr);  // payload is versioned
+			IncludeVersion(ProtocolVersion::withTLogQueueEntryRef()).write(wr);  // payload is versioned
 			wr << qe;
 			wr << uint8_t(1);
 			*(uint32_t*)wr.getData() = wr.getLength() - sizeof(uint32_t) - sizeof(uint8_t);
@@ -158,10 +158,10 @@ namespace oldTLog_4_6 {
 		Future<Void> commit() { return queue->commit(); }
 
 		// Implements IClosable
-		virtual Future<Void> getError() { return queue->getError(); }
-		virtual Future<Void> onClosed() { return queue->onClosed(); }
-		virtual void dispose() { queue->dispose(); delete this; }
-		virtual void close() { queue->close(); delete this; }
+		Future<Void> getError() override { return queue->getError(); }
+		Future<Void> onClosed() override { return queue->onClosed(); }
+		void dispose() override { queue->dispose(); delete this; }
+		void close() override { queue->close(); delete this; }
 
 	private:
 		IDiskQueue* queue;
@@ -324,17 +324,19 @@ namespace oldTLog_4_6 {
 
 			TagData( Version popped, bool nothing_persistent, bool popped_recently, OldTag tag ) : nothing_persistent(nothing_persistent), popped(popped), popped_recently(popped_recently), update_version_sizes(tag != txsTagOld) {}
 
-			TagData(TagData&& r) BOOST_NOEXCEPT : version_messages(std::move(r.version_messages)), nothing_persistent(r.nothing_persistent), popped_recently(r.popped_recently), popped(r.popped), update_version_sizes(r.update_version_sizes) {}
-			void operator= (TagData&& r) BOOST_NOEXCEPT {
-				version_messages = std::move(r.version_messages);
-				nothing_persistent = r.nothing_persistent;
+		    TagData(TagData&& r) noexcept
+		      : version_messages(std::move(r.version_messages)), nothing_persistent(r.nothing_persistent),
+		        popped_recently(r.popped_recently), popped(r.popped), update_version_sizes(r.update_version_sizes) {}
+		    void operator=(TagData&& r) noexcept {
+			    version_messages = std::move(r.version_messages);
+			    nothing_persistent = r.nothing_persistent;
 				popped_recently = r.popped_recently;
 				popped = r.popped;
 				update_version_sizes = r.update_version_sizes;
-			}
+		    }
 
-			// Erase messages not needed to update *from* versions >= before (thus, messages with toversion <= before)
-			ACTOR Future<Void> eraseMessagesBefore( TagData *self, Version before, int64_t* gBytesErased, Reference<LogData> tlogData, TaskPriority taskID ) {
+		    // Erase messages not needed to update *from* versions >= before (thus, messages with toversion <= before)
+		    ACTOR Future<Void> eraseMessagesBefore( TagData *self, Version before, int64_t* gBytesErased, Reference<LogData> tlogData, TaskPriority taskID ) {
 				while(!self->version_messages.empty() && self->version_messages.front().first < before) {
 					Version version = self->version_messages.front().first;
 					std::pair<int, int> &sizes = tlogData->version_sizes[version];
@@ -414,6 +416,7 @@ namespace oldTLog_4_6 {
 				recoveryCount(), stopped(false), initialized(false), queueCommittingVersion(0), newPersistentDataVersion(invalidVersion), recovery(Void())
 		{
 			startRole(Role::TRANSACTION_LOG, interf.id(), tLogData->workerID, {{"SharedTLog", tLogData->dbgid.shortString()}}, "Restored");
+			addActor.send(traceRole(Role::TRANSACTION_LOG, interf.id()));
 
 			persistentDataVersion.init(LiteralStringRef("TLog.PersistentDataVersion"), cc.id);
 			persistentDataDurableVersion.init(LiteralStringRef("TLog.PersistentDataDurableVersion"), cc.id);
@@ -458,8 +461,8 @@ namespace oldTLog_4_6 {
 		state Version stopVersion = logData->version.get();
 
 		TEST(true); // TLog stopped by recovering master
-		TEST( logData->stopped );
-		TEST( !logData->stopped );
+		TEST( logData->stopped ); // LogData already stopped
+		TEST( !logData->stopped ); // LogData not yet stopped
 
 		TraceEvent("TLogStop", logData->logId).detail("Ver", stopVersion).detail("IsStopped", logData->stopped).detail("QueueCommitted", logData->queueCommittedVersion.get());
 
@@ -1002,7 +1005,7 @@ namespace oldTLog_4_6 {
 			auto& sequenceData = trackerData.sequence_version[sequence+1];
 			if(sequenceData.isSet()) {
 				if(sequenceData.getFuture().get() != reply.end) {
-					TEST(true); //tlog peek second attempt ended at a different version
+					TEST(true); //tlog peek second attempt ended at a different version (2)
 					req.reply.sendError(operation_obsolete());
 					return Void();
 				}
@@ -1297,6 +1300,11 @@ namespace oldTLog_4_6 {
 			DUMPTOKEN( recruited.lock );
 			DUMPTOKEN( recruited.getQueuingMetrics );
 			DUMPTOKEN( recruited.confirmRunning );
+			DUMPTOKEN( recruited.waitFailure );
+			DUMPTOKEN( recruited.recoveryFinished );
+			DUMPTOKEN( recruited.disablePopRequest );
+			DUMPTOKEN( recruited.enablePopRequest );
+			DUMPTOKEN( recruited.snapRequest );
 
 			logData = Reference<LogData>( new LogData(self, recruited) );
 			logData->stopped = true;

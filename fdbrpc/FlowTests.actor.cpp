@@ -20,6 +20,7 @@
 
 // Unit tests for the flow language and libraries
 
+#include "flow/ProtocolVersion.h"
 #include "flow/UnitTest.h"
 #include "flow/DeterministicRandom.h"
 #include "flow/IThreadPool.h"
@@ -75,12 +76,25 @@ TEST_CASE("/flow/buggifiedDelay") {
 }
 
 template <class T, class Func, class ErrFunc, class CallbackType>
-class LambdaCallback : public CallbackType, public FastAllocated<LambdaCallback<T,Func,ErrFunc,CallbackType>> {
+class LambdaCallback final : public CallbackType, public FastAllocated<LambdaCallback<T, Func, ErrFunc, CallbackType>> {
 	Func func;
 	ErrFunc errFunc;
 
-	virtual void fire(T const& t) { CallbackType::remove(); func(t); delete this; }
-	virtual void error(Error e) { CallbackType::remove(); errFunc(e); delete this; }
+	void fire(T const& t) override {
+		CallbackType::remove();
+		func(t);
+		delete this;
+	}
+	void fire(T&& t) override {
+		CallbackType::remove();
+		func(std::move(t));
+		delete this;
+	}
+	void error(Error e) override {
+		CallbackType::remove();
+		errFunc(e);
+		delete this;
+	}
 
 public:
 	LambdaCallback(Func&& f, ErrFunc&& e) : func(std::move(f)), errFunc(std::move(e)) {}
@@ -191,14 +205,17 @@ ACTOR static Future<Void> testHygeine() {
 //bool expectActorCount(int x) { return actorCount == x; }
 bool expectActorCount(int) { return true; }
 
-struct YieldMockNetwork : INetwork, ReferenceCounted<YieldMockNetwork> {
+struct YieldMockNetwork final : INetwork, ReferenceCounted<YieldMockNetwork> {
 	int ticks;
 	Promise<Void> nextTick;
 	int nextYield;
 	INetwork* baseNetwork;
 
-	virtual flowGlobalType global(int id) { return baseNetwork->global(id); }
-	virtual void setGlobal(size_t id, flowGlobalType v) { baseNetwork->setGlobal(id, v); return; }
+	flowGlobalType global(int id) const override { return baseNetwork->global(id); }
+	void setGlobal(size_t id, flowGlobalType v) override {
+		baseNetwork->setGlobal(id, v);
+		return;
+	}
 
 	YieldMockNetwork() : ticks(0), nextYield(0) {
 		baseNetwork = g_network;
@@ -215,39 +232,58 @@ struct YieldMockNetwork : INetwork, ReferenceCounted<YieldMockNetwork> {
 		t.send(Void());
 	}
 
-	virtual Future<class Void> delay(double seconds, TaskPriority taskID) {
-		return nextTick.getFuture();
-	}
+	Future<class Void> delay(double seconds, TaskPriority taskID) override { return nextTick.getFuture(); }
 
-	virtual Future<class Void> yield(TaskPriority taskID) {
+	Future<class Void> yield(TaskPriority taskID) override {
 		if (check_yield(taskID))
 			return delay(0,taskID);
 		return Void();
 	}
 
-	virtual bool check_yield(TaskPriority taskID) {
+	bool check_yield(TaskPriority taskID) override {
 		if (nextYield > 0) --nextYield;
 		return nextYield == 0;
 	}
 
 	// Delegate everything else.  TODO: Make a base class NetworkWrapper for delegating everything in INetwork
-	virtual TaskPriority getCurrentTask() { return baseNetwork->getCurrentTask(); }
-	virtual void setCurrentTask(TaskPriority taskID) { baseNetwork->setCurrentTask(taskID); }
-	virtual double now() { return baseNetwork->now(); }
-	virtual double timer() { return baseNetwork->timer(); }
-	virtual void stop() { return baseNetwork->stop(); }
-	virtual bool isSimulated() const { return baseNetwork->isSimulated(); }
-	virtual void onMainThread(Promise<Void>&& signal, TaskPriority taskID) { return baseNetwork->onMainThread(std::move(signal), taskID); }
+	TaskPriority getCurrentTask() const override { return baseNetwork->getCurrentTask(); }
+	void setCurrentTask(TaskPriority taskID) override { baseNetwork->setCurrentTask(taskID); }
+	double now() const override { return baseNetwork->now(); }
+	double timer() override { return baseNetwork->timer(); }
+	double timer_monotonic() override { return baseNetwork->timer_monotonic(); }
+	void stop() override { return baseNetwork->stop(); }
+	void addStopCallback(std::function<void()> fn) override {
+		ASSERT(false);
+		return;
+	}
+	bool isSimulated() const override { return baseNetwork->isSimulated(); }
+	void onMainThread(Promise<Void>&& signal, TaskPriority taskID) override {
+		return baseNetwork->onMainThread(std::move(signal), taskID);
+	}
 	bool isOnMainThread() const override { return baseNetwork->isOnMainThread(); }
-	virtual THREAD_HANDLE startThread(THREAD_FUNC_RETURN(*func) (void *), void *arg) { return baseNetwork->startThread(func,arg); }
-	virtual Future< Reference<class IAsyncFile> > open(std::string filename, int64_t flags, int64_t mode) { return IAsyncFileSystem::filesystem()->open(filename,flags,mode); }
-	virtual Future< Void > deleteFile(std::string filename, bool mustBeDurable) { return IAsyncFileSystem::filesystem()->deleteFile(filename,mustBeDurable); }
-	virtual void run() { return baseNetwork->run(); }
-	virtual void getDiskBytes(std::string const& directory, int64_t& free, int64_t& total)  { return baseNetwork->getDiskBytes(directory,free,total); }
-	virtual bool isAddressOnThisHost(NetworkAddress const& addr) { return baseNetwork->isAddressOnThisHost(addr); }
-	virtual const TLSConfig& getTLSConfig() {
+	THREAD_HANDLE startThread(THREAD_FUNC_RETURN (*func)(void*), void* arg) override {
+		return baseNetwork->startThread(func, arg);
+	}
+	Future<Reference<class IAsyncFile>> open(std::string filename, int64_t flags, int64_t mode) {
+		return IAsyncFileSystem::filesystem()->open(filename, flags, mode);
+	}
+	Future<Void> deleteFile(std::string filename, bool mustBeDurable) {
+		return IAsyncFileSystem::filesystem()->deleteFile(filename, mustBeDurable);
+	}
+	void run() override { return baseNetwork->run(); }
+	bool checkRunnable() override { return baseNetwork->checkRunnable(); }
+	void getDiskBytes(std::string const& directory, int64_t& free, int64_t& total) override {
+		return baseNetwork->getDiskBytes(directory, free, total);
+	}
+	bool isAddressOnThisHost(NetworkAddress const& addr) const override {
+		return baseNetwork->isAddressOnThisHost(addr);
+	}
+	const TLSConfig& getTLSConfig() const override {
 		static TLSConfig emptyConfig;
 		return emptyConfig;
+	}
+	ProtocolVersion protocolVersion() override {
+		return baseNetwork->protocolVersion();
 	}
 };
 
@@ -651,7 +687,7 @@ TEST_CASE("/flow/flow/yieldedFuture/progress")
 	// Check that if check_yield always returns true, the yieldedFuture will do nothing immediately but will
 	// get one thing done per "tick" (per delay(0) returning).
 
-	Reference<YieldMockNetwork> yn( new YieldMockNetwork );
+	auto yn = makeReference<YieldMockNetwork>();
 
 	yn->nextYield = 0;
 
@@ -686,7 +722,7 @@ TEST_CASE("/flow/flow/yieldedFuture/random")
 {
 	// Check expectations about exactly how yieldedFuture responds to check_yield results
 
-	Reference<YieldMockNetwork> yn( new YieldMockNetwork );
+	auto yn = makeReference<YieldMockNetwork>();
 
 	for(int r=0; r<100; r++) {
 		Promise<Void> p;
@@ -734,7 +770,7 @@ TEST_CASE("/flow/perf/yieldedFuture")
 	double start;
 	int N = 1000000;
 
-	Reference<YieldMockNetwork> yn( new YieldMockNetwork );
+	auto yn = makeReference<YieldMockNetwork>();
 
 	yn->nextYield = 2*N + 100;
 
@@ -1358,5 +1394,107 @@ TEST_CASE("/flow/DeterministicRandom/SignedOverflow") {
 	ASSERT(deterministicRandom()->randomInt64(std::numeric_limits<int64_t>::max() - 1,
 	                                          std::numeric_limits<int64_t>::max()) ==
 	       std::numeric_limits<int64_t>::max() - 1);
+	return Void();
+}
+
+struct Tracker {
+	int copied;
+	bool moved;
+	Tracker(int copied = 0) : moved(false), copied(copied) {}
+	Tracker(Tracker&& other) : Tracker(other.copied) {
+		ASSERT(!other.moved);
+		other.moved = true;
+	}
+	Tracker& operator=(Tracker&& other) {
+		ASSERT(!other.moved);
+		other.moved = true;
+		this->moved = false;
+		this->copied = other.copied;
+		return *this;
+	}
+	Tracker(const Tracker& other) : Tracker(other.copied + 1) { ASSERT(!other.moved); }
+	Tracker& operator=(const Tracker& other) {
+		ASSERT(!other.moved);
+		this->moved = false;
+		this->copied = other.copied + 1;
+		return *this;
+	}
+	~Tracker() = default;
+
+	ACTOR static Future<Void> listen(FutureStream<Tracker> stream) {
+		Tracker movedTracker = waitNext(stream);
+		ASSERT(!movedTracker.moved);
+		ASSERT(movedTracker.copied == 0);
+		return Void();
+	}
+};
+
+TEST_CASE("/flow/flow/PromiseStream/move") {
+	state PromiseStream<Tracker> stream;
+	state Future<Void> listener;
+	{
+		// This tests the case when a callback is added before
+		// a movable value is sent
+		listener = Tracker::listen(stream.getFuture());
+		stream.send(Tracker{});
+		wait(listener);
+	}
+
+	{
+		// This tests the case when a callback is added before
+		// a unmovable value is sent
+		listener = Tracker::listen(stream.getFuture());
+		Tracker namedTracker;
+		stream.send(namedTracker);
+		wait(listener);
+	}
+	{
+		// This tests the case when no callback is added until
+		// after a movable value is sent
+		stream.send(Tracker{});
+		stream.send(Tracker{});
+		{
+			state Tracker movedTracker = waitNext(stream.getFuture());
+			ASSERT(!movedTracker.moved);
+			ASSERT(movedTracker.copied == 0);
+		}
+		{
+			Tracker movedTracker = waitNext(stream.getFuture());
+			ASSERT(!movedTracker.moved);
+			ASSERT(movedTracker.copied == 0);
+		}
+	}
+	{
+		// This tests the case when no callback is added until
+		// after an unmovable value is sent
+		Tracker namedTracker1;
+		Tracker namedTracker2;
+		stream.send(namedTracker1);
+		stream.send(namedTracker2);
+		{
+			state Tracker copiedTracker = waitNext(stream.getFuture());
+			ASSERT(!copiedTracker.moved);
+			// must copy onto queue
+			ASSERT(copiedTracker.copied == 1);
+		}
+		{
+			Tracker copiedTracker = waitNext(stream.getFuture());
+			ASSERT(!copiedTracker.moved);
+			// must copy onto queue
+			ASSERT(copiedTracker.copied == 1);
+		}
+	}
+
+	return Void();
+}
+
+TEST_CASE("/flow/flow/PromiseStream/move2") {
+	PromiseStream<Tracker> stream;
+	stream.send(Tracker{});
+	Tracker tracker = waitNext(stream.getFuture());
+	Tracker movedTracker = std::move(tracker);
+	ASSERT(tracker.moved);
+	ASSERT(!movedTracker.moved);
+	ASSERT(movedTracker.copied == 0);
 	return Void();
 }

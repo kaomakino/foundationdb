@@ -36,7 +36,6 @@ class FDBTransaction extends NativeObjectWrapper implements Transaction, OptionC
 	private final TransactionOptions options;
 
 	private boolean transactionOwner;
-
 	public final ReadTransaction snapshot;
 
 	class ReadSnapshot implements ReadTransaction {
@@ -78,6 +77,16 @@ class FDBTransaction extends NativeObjectWrapper implements Transaction, OptionC
 		@Override
 		public CompletableFuture<Long> getEstimatedRangeSizeBytes(Range range) {
 			return FDBTransaction.this.getEstimatedRangeSizeBytes(range);
+		}
+
+		@Override
+		public CompletableFuture<KeyArrayResult> getRangeSplitPoints(byte[] begin, byte[] end, long chunkSize) {
+			return FDBTransaction.this.getRangeSplitPoints(begin, end, chunkSize);
+		}
+
+		@Override
+		public CompletableFuture<KeyArrayResult> getRangeSplitPoints(Range range, long chunkSize) {
+			return FDBTransaction.this.getRangeSplitPoints(range, chunkSize);
 		}
 
 		///////////////////
@@ -282,6 +291,21 @@ class FDBTransaction extends NativeObjectWrapper implements Transaction, OptionC
 		return this.getEstimatedRangeSizeBytes(range.begin, range.end);
 	}
 
+	@Override
+	public CompletableFuture<KeyArrayResult> getRangeSplitPoints(byte[] begin, byte[] end, long chunkSize) {
+		pointerReadLock.lock();
+		try {
+			return new FutureKeyArray(Transaction_getRangeSplitPoints(getPtr(), begin, end, chunkSize), executor);
+		} finally {
+			pointerReadLock.unlock();
+		}
+	}
+
+	@Override
+	public CompletableFuture<KeyArrayResult> getRangeSplitPoints(Range range, long chunkSize) {
+		return this.getRangeSplitPoints(range.begin, range.end, chunkSize);
+	}
+
 	///////////////////
 	//  getRange -> KeySelectors
 	///////////////////
@@ -369,10 +393,11 @@ class FDBTransaction extends NativeObjectWrapper implements Transaction, OptionC
 					" -- range get: (%s, %s) limit: %d, bytes: %d, mode: %d, iteration: %d, snap: %s, reverse %s",
 				begin.toString(), end.toString(), rowLimit, targetBytes, streamingMode,
 				iteration, Boolean.toString(isSnapshot), Boolean.toString(reverse)));*/
-			return new FutureResults(Transaction_getRange(
-					getPtr(), begin.getKey(), begin.orEqual(), begin.getOffset(),
-					end.getKey(), end.orEqual(), end.getOffset(), rowLimit, targetBytes,
-					streamingMode, iteration, isSnapshot, reverse), executor);
+			return new FutureResults(
+				Transaction_getRange(getPtr(), begin.getKey(), begin.orEqual(), begin.getOffset(),
+									 end.getKey(), end.orEqual(), end.getOffset(), rowLimit, targetBytes,
+									 streamingMode, iteration, isSnapshot, reverse),
+				FDB.instance().isDirectBufferQueriesEnabled(), executor);
 		} finally {
 			pointerReadLock.unlock();
 		}
@@ -685,4 +710,5 @@ class FDBTransaction extends NativeObjectWrapper implements Transaction, OptionC
 	private native void Transaction_cancel(long cPtr);
 	private native long Transaction_getKeyLocations(long cPtr, byte[] key);
 	private native long Transaction_getEstimatedRangeSizeBytes(long cPtr, byte[] keyBegin, byte[] keyEnd);
+	private native long Transaction_getRangeSplitPoints(long cPtr, byte[] keyBegin, byte[] keyEnd, long chunkSize);
 }

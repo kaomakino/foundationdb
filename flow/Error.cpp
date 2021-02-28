@@ -21,17 +21,13 @@
 #include "flow/Error.h"
 #include "flow/Trace.h"
 #include "flow/Knobs.h"
+#include "flow/UnitTest.h"
 #include <iostream>
 using std::cout;
 using std::endl;
 using std::make_pair;
 
 bool g_crashOnError = false;
-
-std::map<int, int>& Error::errorCounts() {
-	static std::map<int, int> counts;
-	return counts;
-}
 
 #include <iostream>
 
@@ -57,21 +53,64 @@ Error internal_error_impl( const char* file, int line ) {
 	return Error(error_code_internal_error);
 }
 
-Error::Error(int error_code)
-	: error_code(error_code), flags(0)
-{
+Error internal_error_impl(const char* msg, const char* file, int line) {
+	fprintf(stderr, "Assertion %s failed @ %s %d:\n  %s\n", msg, file, line, platform::get_backtrace().c_str());
+
+	TraceEvent(SevError, "InternalError")
+	    .error(Error::fromCode(error_code_internal_error))
+	    .detail("FailedAssertion", msg)
+	    .detail("File", file)
+	    .detail("Line", line)
+	    .backtrace();
+	flushTraceFileVoid();
+	return Error(error_code_internal_error);
+}
+
+Error internal_error_impl(const char* a_nm, long long a, const char * op_nm, const char * b_nm, long long b, const char * file, int line) {
+	fprintf(stderr, "Assertion failed @ %s %d:\n", file, line);
+	fprintf(stderr, "  expression:\n");
+	fprintf(stderr, "              %s %s %s\n", a_nm, op_nm, b_nm);
+	fprintf(stderr, "  expands to:\n");
+	fprintf(stderr, "              %lld %s %lld\n\n", a, op_nm, b);
+	fprintf(stderr, "  %s\n", platform::get_backtrace().c_str());
+
+	TraceEvent(SevError, "InternalError")
+	    .error(Error::fromCode(error_code_internal_error))
+	    .detailf("FailedAssertion", "%s %s %s", a_nm, op_nm, b_nm)
+		.detail("LeftValue", a)
+		.detail("RightValue", b)
+	    .detail("File", file)
+	    .detail("Line", line)
+	    .backtrace();
+	flushTraceFileVoid();
+	return Error(error_code_internal_error);
+}
+
+Error::Error(int error_code) : error_code(error_code), flags(0) {
 	if (TRACE_SAMPLE()) TraceEvent(SevSample, "ErrorCreated").detail("ErrorCode", error_code);
-	//std::cout << "Error: " << error_code << std::endl;
+	// std::cout << "Error: " << error_code << std::endl;
 	if (error_code >= 3000 && error_code < 6000) {
-		TraceEvent(SevError, "SystemError").error(*this).backtrace();
+		{
+			TraceEvent te(SevError, "SystemError");
+			te.error(*this).backtrace();
+			if (error_code == error_code_unknown_error) {
+				auto exception = std::current_exception();
+				if (exception) {
+					try {
+						std::rethrow_exception(exception);
+					} catch (std::exception& e) {
+						te.detail("StdException", e.what());
+					} catch (...) {
+					}
+				}
+			}
+		}
 		if (g_crashOnError) {
 			flushOutputStreams();
 			flushTraceFileVoid();
 			crashAndDie();
 		}
 	}
-	/*if (error_code)
-		errorCounts()[error_code]++;*/
 }
 
 ErrorCodeTable& Error::errorCodeTable() {
@@ -80,14 +119,14 @@ ErrorCodeTable& Error::errorCodeTable() {
 }
 
 const char* Error::name() const {
-	auto table = errorCodeTable();
+	const auto& table = errorCodeTable();
 	auto it = table.find(error_code);
 	if (it == table.end()) return "UNKNOWN_ERROR";
 	return it->second.first;
 }
 
 const char* Error::what() const {
-	auto table = errorCodeTable();
+	const auto& table = errorCodeTable();
 	auto it = table.find(error_code);
 	if (it == table.end()) return "UNKNOWN_ERROR";
 	return it->second.second;
@@ -118,4 +157,21 @@ bool isAssertDisabled(int line) {
 
 void breakpoint_me() {
 	return;
+}
+
+TEST_CASE("/flow/AssertTest") {
+	// this is mostly checking bug for bug compatibility with the C integer / sign promotion rules.
+
+	ASSERT_LT(-1, 0);
+	ASSERT_EQ(0, 0u);
+	ASSERT_GT(1, -1);
+	ASSERT_EQ((int32_t)0xFFFFFFFF, (int32_t)-1);
+	// ASSERT_LT(-1, 0u);  // fails: -1 is promoted to unsigned value in comparison.
+	// ASSERT(-1 < 0u); // also fails
+	int sz = 42;
+	size_t ln = 43;
+	ASSERT(sz < ln);
+	ASSERT_EQ(0xFFFFFFFF, (int32_t)-1);
+
+	return Void();
 }

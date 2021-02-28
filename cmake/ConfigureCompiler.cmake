@@ -1,17 +1,41 @@
-set(USE_GPERFTOOLS OFF CACHE BOOL "Use gperfools for profiling")
-set(USE_VALGRIND OFF CACHE BOOL "Compile for valgrind usage")
-set(USE_VALGRIND_FOR_CTEST ${USE_VALGRIND} CACHE BOOL "Use valgrind for ctest")
-set(ALLOC_INSTRUMENTATION OFF CACHE BOOL "Instrument alloc")
-set(WITH_UNDODB OFF CACHE BOOL "Use rr or undodb")
-set(USE_ASAN OFF CACHE BOOL "Compile with address sanitizer")
-set(USE_UBSAN OFF CACHE BOOL "Compile with undefined behavior sanitizer")
-set(FDB_RELEASE OFF CACHE BOOL "This is a building of a final release")
-set(USE_LD "DEFAULT" CACHE STRING "The linker to use for building: can be LD (system default, default choice), BFD, GOLD, or LLD")
-set(USE_LIBCXX OFF CACHE BOOL "Use libc++")
-set(USE_CCACHE OFF CACHE BOOL "Use ccache for compilation if available")
-set(RELATIVE_DEBUG_PATHS OFF CACHE BOOL "Use relative file paths in debug info")
-set(STATIC_LINK_LIBCXX ON CACHE BOOL "Statically link libstdcpp/libc++")
-set(USE_WERROR OFF CACHE BOOL "Compile with -Werror. Recommended for local development and CI.")
+include(CompilerChecks)
+
+env_set(USE_GPERFTOOLS OFF BOOL "Use gperfools for profiling")
+env_set(USE_DTRACE ON BOOL "Enable dtrace probes on supported platforms")
+env_set(USE_VALGRIND OFF BOOL "Compile for valgrind usage")
+env_set(USE_VALGRIND_FOR_CTEST ${USE_VALGRIND} BOOL "Use valgrind for ctest")
+env_set(ALLOC_INSTRUMENTATION OFF BOOL "Instrument alloc")
+env_set(USE_ASAN OFF BOOL "Compile with address sanitizer")
+env_set(USE_GCOV OFF BOOL "Compile with gcov instrumentation")
+env_set(USE_MSAN OFF BOOL "Compile with memory sanitizer. To avoid false positives you need to dynamically link to a msan-instrumented libc++ and libc++abi, which you must compile separately. See https://github.com/google/sanitizers/wiki/MemorySanitizerLibcxxHowTo#instrumented-libc.")
+env_set(USE_TSAN OFF BOOL "Compile with thread sanitizer. It is recommended to dynamically link to a tsan-instrumented libc++ and libc++abi, which you can compile separately.")
+env_set(USE_UBSAN OFF BOOL "Compile with undefined behavior sanitizer")
+env_set(FDB_RELEASE OFF BOOL "This is a building of a final release")
+env_set(USE_CCACHE OFF BOOL "Use ccache for compilation if available")
+env_set(RELATIVE_DEBUG_PATHS OFF BOOL "Use relative file paths in debug info")
+env_set(USE_WERROR OFF BOOL "Compile with -Werror. Recommended for local development and CI.")
+default_linker(_use_ld)
+env_set(USE_LD "${_use_ld}" STRING
+  "The linker to use for building: can be LD (system default and same as DEFAULT), BFD, GOLD, or LLD - will be LLD for Clang if available, DEFAULT otherwise")
+use_libcxx(_use_libcxx)
+env_set(USE_LIBCXX "${_use_libcxx}" BOOL "Use libc++")
+static_link_libcxx(_static_link_libcxx)
+env_set(STATIC_LINK_LIBCXX "${_static_link_libcxx}" BOOL "Statically link libstdcpp/libc++")
+
+set(USE_SANITIZER OFF)
+if(USE_ASAN OR USE_VALGRIND OR USE_MSAN OR USE_TSAN OR USE_UBSAN)
+  set(USE_SANITIZER ON)
+endif()
+
+if(USE_LIBCXX AND STATIC_LINK_LIBCXX AND NOT USE_LD STREQUAL "LLD")
+  message(FATAL_ERROR "Unsupported configuration: STATIC_LINK_LIBCXX with libc++ only works if USE_LD=LLD")
+endif()
+if(STATIC_LINK_LIBCXX AND USE_TSAN)
+  message(FATAL_ERROR "Unsupported configuration: STATIC_LINK_LIBCXX doesn't work with tsan")
+endif()
+if(STATIC_LINK_LIBCXX AND USE_MSAN)
+  message(FATAL_ERROR "Unsupported configuration: STATIC_LINK_LIBCXX doesn't work with msan")
+endif()
 
 set(rel_debug_paths OFF)
 if(RELATIVE_DEBUG_PATHS)
@@ -25,42 +49,17 @@ endif()
 add_compile_options(-DCMAKE_BUILD)
 add_compile_definitions(BOOST_ERROR_CODE_HEADER_ONLY BOOST_SYSTEM_NO_DEPRECATED)
 
+set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
-if(ALLOC_INSTRUMENTATION)
-  add_compile_options(-DALLOC_INSTRUMENTATION)
-endif()
-if(WITH_UNDODB)
-  add_compile_options(-DWITH_UNDODB)
-endif()
-if(DEBUG_TASKS)
-  add_compile_options(-DDEBUG_TASKS)
-endif()
-
-if(NDEBUG)
-  add_compile_options(-DNDEBUG)
-endif()
-
-if(FDB_RELEASE)
-  add_compile_options(-DFDB_RELEASE)
-  add_compile_options(-DFDB_CLEAN_BUILD)
-endif()
 
 include_directories(${CMAKE_SOURCE_DIR})
-include_directories(${CMAKE_CURRENT_BINARY_DIR})
-if (NOT OPEN_FOR_IDE)
-  add_definitions(-DNO_INTELLISENSE)
-endif()
+include_directories(${CMAKE_BINARY_DIR})
+
 if(WIN32)
-  add_definitions(-DUSE_USEFIBERS)
-else()
-  add_definitions(-DUSE_UCONTEXT)
+  add_definitions(-DBOOST_USE_WINDOWS_H)
+  add_definitions(-DWIN32_LEAN_AND_MEAN)
 endif()
 
-if ((NOT USE_CCACHE) AND (NOT "$ENV{USE_CCACHE}" STREQUAL ""))
-  if (("$ENV{USE_CCACHE}" STREQUAL "ON") OR ("$ENV{USE_CCACHE}" STREQUAL "1") OR ("$ENV{USE_CCACHE}" STREQUAL "YES"))
-    set(USE_CCACHE ON)
-  endif()
-endif()
 if (USE_CCACHE)
   FIND_PROGRAM(CCACHE_FOUND "ccache")
   if(CCACHE_FOUND)
@@ -71,17 +70,25 @@ if (USE_CCACHE)
   endif()
 endif()
 
-if ((NOT USE_LIBCXX) AND (NOT "$ENV{USE_LIBCXX}" STREQUAL ""))
-  string(TOUPPER "$ENV{USE_LIBCXX}" USE_LIBCXXENV)
-  if (("${USE_LIBCXXENV}" STREQUAL "ON") OR ("${USE_LIBCXXENV}" STREQUAL "1") OR ("${USE_LIBCXXENV}" STREQUAL "YES"))
-    set(USE_LIBCXX ON)
-  endif()
-endif()
-
 include(CheckFunctionExists)
 set(CMAKE_REQUIRED_INCLUDES stdlib.h malloc.h)
 set(CMAKE_REQUIRED_LIBRARIES c)
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+if(NOT OPEN_FOR_IDE)
+  add_compile_definitions(NO_INTELLISENSE)
+endif()
+
+if(NOT WIN32)
+  include(CheckIncludeFile)
+  CHECK_INCLUDE_FILE("stdatomic.h" HAS_C11_ATOMICS)
+  if (NOT HAS_C11_ATOMICS)
+    message(FATAL_ERROR "C compiler does not support c11 atomics")
+  endif()
+endif()
 
 if(WIN32)
   # see: https://docs.microsoft.com/en-us/windows/desktop/WinProg/using-the-windows-headers
@@ -92,7 +99,7 @@ if(WIN32)
     string(REGEX REPLACE "/W[0-4]" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
   endif()
   add_compile_options(/W0 /EHsc /bigobj $<$<CONFIG:Release>:/Zi> /MP /FC /Gm-)
-  add_compile_definitions(_WIN32_WINNT=${WINDOWS_TARGET} WINVER=${WINDOWS_TARGET} NTDDI_VERSION=0x05020000 BOOST_ALL_NO_LIB)
+  add_compile_definitions(NOMINMAX)
   set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /MT")
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /MTd")
 else()
@@ -107,16 +114,6 @@ else()
     # This is not a very good test. However, as we do not really support many architectures
     # this is good enough for now
     set(GCC YES)
-  endif()
-
-  # Use the linker environmental variable, if specified and valid
-  if ((USE_LD STREQUAL "DEFAULT") AND (NOT "$ENV{USE_LD}" STREQUAL ""))
-    string(TOUPPER "$ENV{USE_LD}" USE_LDENV)
-    if (("${USE_LDENV}" STREQUAL "LD") OR ("${USE_LDENV}" STREQUAL "GOLD") OR ("${USE_LDENV}" STREQUAL "LLD") OR ("${USE_LDENV}" STREQUAL "BFD") OR ("${USE_LDENV}" STREQUAL "DEFAULT"))
-      set(USE_LD "${USE_LDENV}")
-    else()
-      message (FATAL_ERROR "USE_LD must be set to DEFAULT, LD, BFD, GOLD, or LLD!")
-    endif()
   endif()
 
   # check linker flags.
@@ -152,27 +149,54 @@ else()
     add_compile_options("-fdebug-prefix-map=${CMAKE_SOURCE_DIR}=." "-fdebug-prefix-map=${CMAKE_BINARY_DIR}=.")
   endif()
 
+  set(SANITIZER_COMPILE_OPTIONS)
+  set(SANITIZER_LINK_OPTIONS)
+
   # we always compile with debug symbols. CPack will strip them out
   # and create a debuginfo rpm
   add_compile_options(-ggdb -fno-omit-frame-pointer)
   if(USE_ASAN)
-    add_compile_options(
+    list(APPEND SANITIZER_COMPILE_OPTIONS
       -fsanitize=address
-      -DUSE_SANITIZER)
-    set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -fsanitize=address")
-    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=address")
-    set(CMAKE_EXE_LINKER_FLAGS    "${CMAKE_EXE_LINKER_FLAGS}    -fsanitize=address ${CMAKE_THREAD_LIBS_INIT}")
+      -DADDRESS_SANITIZER
+      -DBOOST_USE_ASAN
+      -DBOOST_USE_UCONTEXT)
+    list(APPEND SANITIZER_LINK_OPTIONS -fsanitize=address)
+  endif()
+
+  if(USE_MSAN)
+    if(NOT CLANG)
+      message(FATAL_ERROR "Unsupported configuration: USE_MSAN only works with Clang")
+    endif()
+    list(APPEND SANITIZER_COMPILE_OPTIONS -fsanitize=memory -fsanitize-memory-track-origins=2)
+    list(APPEND SANITIZER_LINK_OPTIONS -fsanitize=memory)
+  endif()
+
+  if(USE_GCOV)
+    add_link_options(--coverage)
   endif()
 
   if(USE_UBSAN)
-    add_compile_options(
+    list(APPEND SANITIZER_COMPILE_OPTIONS
       -fsanitize=undefined
       # TODO(atn34) Re-enable -fsanitize=alignment once https://github.com/apple/foundationdb/issues/1434 is resolved
-      -fno-sanitize=alignment
-      -DUSE_SANITIZER)
-    set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -fsanitize=undefined")
-    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=undefined")
-    set(CMAKE_EXE_LINKER_FLAGS    "${CMAKE_EXE_LINKER_FLAGS}    -fsanitize=undefined ${CMAKE_THREAD_LIBS_INIT}")
+      -fno-sanitize=alignment)
+    list(APPEND SANITIZER_LINK_OPTIONS -fsanitize=undefined)
+  endif()
+
+  if(USE_TSAN)
+    list(APPEND SANITIZER_COMPILE_OPTIONS -fsanitize=thread)
+    list(APPEND SANITIZER_LINK_OPTIONS -fsanitize=thread)
+  endif()
+
+  set(USE_SANITIZER OFF)
+  if(SANITIZER_COMPILE_OPTIONS)
+    add_compile_options(${SANITIZER_COMPILE_OPTIONS})
+    set(USE_SANITIZER ON)
+  endif()
+  if(SANITIZER_LINK_OPTIONS)
+    add_link_options(${SANITIZER_LINK_OPTIONS})
+    set(USE_SANITIZER ON)
   endif()
 
   if(PORTABLE_BINARY)
@@ -196,26 +220,54 @@ else()
   #   -mavx
   #   -msse4.2)
 
-  if ((NOT USE_VALGRIND) AND (NOT "$ENV{USE_VALGRIND}" STREQUAL ""))
-    if (("$ENV{USE_VALGRIND}" STREQUAL "ON") OR ("$ENV{USE_VALGRIND}" STREQUAL "1") OR ("$ENV{USE_VALGRIND}" STREQUAL "YES"))
-      set(USE_VALGRIND ON)
+  # Tentatively re-enabling vector instructions
+  set(USE_AVX512F OFF CACHE BOOL "Enable AVX 512F instructions")
+  if (USE_AVX512F)
+    if (CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^x86")
+      add_compile_options(-mavx512f)
+    elseif(USE_VALGRIND)
+      message(STATUS "USE_VALGRIND=ON make USE_AVX OFF to satisfy valgrind analysis requirement")
+      set(USE_AVX512F OFF)
+    else()
+      message(STATUS "USE_AVX512F is supported on x86 or x86_64 only")
+      set(USE_AVX512F OFF)
+    endif()
+  endif()
+  set(USE_AVX ON CACHE BOOL "Enable AVX instructions")
+  if (USE_AVX)
+    if (CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^x86")
+      add_compile_options(-mavx)
+    elseif(USE_VALGRIND)
+      message(STATUS "USE_VALGRIND=ON make USE_AVX OFF to satisfy valgrind analysis requirement")
+      set(USE_AVX OFF)
+    else()
+      message(STATUS "USE_AVX is supported on x86 or x86_64 only")
+      set(USE_AVX OFF)
     endif()
   endif()
 
-  if (USE_VALGRIND)
-    add_compile_options(-DVALGRIND -DUSE_VALGRIND)
-  endif()
+  # Intentionally using builtin memcpy.  G++ does a good job on small memcpy's when the size is known at runtime.
+  # If the size is not known, then it falls back on the memcpy that's available at runtime (rte_memcpy, as of this
+  # writing; see flow.cpp).
+  #
+  # The downside of the builtin memcpy is that it's slower at large copies, so if we spend a lot of time on large
+  # copies of sizes that are known at compile time, this might not be a win.  See the output of performance/memcpy
+  # for more information.
+  #add_compile_options(-fno-builtin-memcpy)
+
   if (CLANG)
     add_compile_options()
     # Clang has link errors unless `atomic` is specifically requested.
     if(NOT APPLE)
-      add_link_options(-latomic)
+      #add_link_options(-latomic)
     endif()
     if (APPLE OR USE_LIBCXX)
       add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>)
-      add_compile_definitions(WITH_LIBCXX)
       if (NOT APPLE)
-        add_link_options(-lc++ -lc++abi -Wl,-build-id=sha1)
+        if (STATIC_LINK_LIBCXX)
+          add_link_options(-static-libgcc -nostdlib++  -Wl,-Bstatic -lc++ -lc++abi -Wl,-Bdynamic)
+        endif()
+        add_link_options(-stdlib=libc++ -Wl,-build-id=sha1)
       endif()
     endif()
     if (OPEN_FOR_IDE)
@@ -223,19 +275,35 @@ else()
         -Wno-unknown-attributes)
     endif()
     add_compile_options(
-      -Wno-unknown-warning-option
-      -Wno-dangling-else
-      -Wno-sign-compare
+      -Wall -Wextra
+      # Here's the current set of warnings we need to explicitly disable to compile warning-free with clang 10
       -Wno-comment
-      -Wno-unknown-pragmas
+      -Wno-dangling-else
       -Wno-delete-non-virtual-dtor
+      -Wno-format
+      -Wno-mismatched-tags
+      -Wno-missing-field-initializers
+      -Wno-overloaded-virtual
+      -Wno-reorder
+      -Wno-reorder-ctor
+      -Wno-sign-compare
+      -Wno-tautological-pointer-compare
       -Wno-undefined-var-template
       -Wno-tautological-pointer-compare
-      -Wno-format)
+      -Wredundant-move
+      -Wpessimizing-move
+      -Woverloaded-virtual
+      -Wno-unknown-pragmas
+      -Wno-unknown-warning-option
+      -Wno-unused-function
+      -Wno-unused-local-typedef
+      -Wno-unused-parameter
+      -Wno-self-assign
+      )
     if (USE_CCACHE)
       add_compile_options(
         -Wno-register
-        -Wno-error=unused-command-line-argument)
+        -Wno-unused-command-line-argument)
     endif()
   endif()
   if (USE_WERROR)
@@ -243,7 +311,6 @@ else()
   endif()
   if (GCC)
     add_compile_options(-Wno-pragmas)
-
     # Otherwise `state [[maybe_unused]] int x;` will issue a warning.
     # https://stackoverflow.com/questions/50646334/maybe-unused-on-member-variable-gcc-warns-incorrectly-that-attribute-is
     add_compile_options(-Wno-attributes)
@@ -257,6 +324,9 @@ else()
     -fvisibility=hidden
     -Wreturn-type
     -fPIC)
+  if (CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^x86")
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wclass-memaccess>)
+  endif()
   if (GPERFTOOLS_FOUND AND GCC)
     add_compile_options(
       -fno-builtin-malloc
@@ -265,16 +335,19 @@ else()
       -fno-builtin-free)
   endif()
 
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+    # Graviton2 or later
+    # https://github.com/aws/aws-graviton-gettting-started
+    add_compile_options(-march=armv8.2-a+crc+simd)
+  endif()
+
   # Check whether we can use dtrace probes
   include(CheckSymbolExists)
   check_symbol_exists(DTRACE_PROBE sys/sdt.h SUPPORT_DTRACE)
   check_symbol_exists(aligned_alloc stdlib.h HAS_ALIGNED_ALLOC)
   message(STATUS "Has aligned_alloc: ${HAS_ALIGNED_ALLOC}")
-  if(SUPPORT_DTRACE)
-    add_compile_definitions(DTRACE_PROBES)
-  endif()
-  if(HAS_ALIGNED_ALLOC)
-    add_compile_definitions(HAS_ALIGNED_ALLOC)
+  if((SUPPORT_DTRACE) AND (USE_DTRACE))
+    set(DTRACE_PROBES 1)
   endif()
 
   if(CMAKE_COMPILER_IS_GNUCXX)

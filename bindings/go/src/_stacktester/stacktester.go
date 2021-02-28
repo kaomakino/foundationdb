@@ -569,6 +569,27 @@ func (sm *StackMachine) processInst(idx int, inst tuple.Tuple) {
 		}
 
 		sm.store(idx, res.(fdb.FutureByteSlice))
+	case op == "GET_ESTIMATED_RANGE_SIZE":
+		r := sm.popKeyRange()
+		_, e := rt.ReadTransact(func(rtr fdb.ReadTransaction) (interface{}, error) {
+			_ = rtr.GetEstimatedRangeSizeBytes(r).MustGet()
+			sm.store(idx, []byte("GOT_ESTIMATED_RANGE_SIZE"))
+			return nil, nil
+		})
+		if e != nil {
+			panic(e)
+		}
+	case op == "GET_RANGE_SPLIT_POINTS":
+		r := sm.popKeyRange()
+		chunkSize := sm.waitAndPop().item.(int64)
+		_, e := rt.ReadTransact(func(rtr fdb.ReadTransaction) (interface{}, error) {
+			_ = rtr.GetRangeSplitPoints(r, chunkSize).MustGet()
+			sm.store(idx, []byte("GOT_RANGE_SPLIT_POINTS"))
+			return nil, nil
+		})
+		if e != nil {
+			panic(e)
+		}
 	case op == "COMMIT":
 		sm.store(idx, sm.currentTransaction().Commit())
 	case op == "RESET":

@@ -78,7 +78,7 @@ struct serializable_traits<OptionalInterface<Interface>> : std::true_type {
 	}
 };
 
-
+// Contains a generation of tLogs for an individual DC.
 struct TLogSet {
 	constexpr static FileIdentifier file_identifier = 6302317;
 	std::vector<OptionalInterface<TLogInterface>> tLogs;
@@ -203,7 +203,6 @@ enum class LogSystemType {
 	empty = 0, // Never used.
 	tagPartitioned = 2,
 };
-BINARY_SERIALIZABLE(LogSystemType);
 
 struct LogSystemConfig {
 	constexpr static FileIdentifier file_identifier = 16360847;
@@ -233,7 +232,7 @@ struct LogSystemConfig {
 			if(!tLogs[i].isLocal) {
 				for( int j = 0; j < tLogs[i].tLogs.size(); j++ ) {
 					if( tLogs[i].tLogs[j].present() ) {
-						return tLogs[i].tLogs[j].interf().locality.dcId();
+						return tLogs[i].tLogs[j].interf().filteredLocality.dcId();
 					}
 				}
 			}
@@ -277,7 +276,7 @@ struct LogSystemConfig {
 		for( auto& tLogSet : tLogs ) {
 			for( auto& tLog : tLogSet.tLogs ) {
 				if( tLogSet.locality >= 0 ) {
-					if( tLog.present() && tLog.interf().locality.dcId() == dcId ) {
+					if( tLog.present() && tLog.interf().filteredLocality.dcId() == dcId ) {
 						matchingLocalities[tLogSet.locality]++;
 					} else {
 						allLocalities[tLogSet.locality]++;
@@ -290,7 +289,7 @@ struct LogSystemConfig {
 			for( auto& tLogSet : oldLog.tLogs ) {
 				for( auto& tLog : tLogSet.tLogs ) {
 					if( tLogSet.locality >= 0 ) {
-						if( tLog.present() && tLog.interf().locality.dcId() == dcId ) {
+						if( tLog.present() && tLog.interf().filteredLocality.dcId() == dcId ) {
 							matchingLocalities[tLogSet.locality]++;
 						} else {
 							allLocalities[tLogSet.locality]++;

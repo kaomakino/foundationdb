@@ -24,6 +24,13 @@
 
 #include "fdbclient/CoordinationInterface.h"
 
+constexpr UID WLTOKEN_LEADERELECTIONREG_CANDIDACY(-1, 4);
+constexpr UID WLTOKEN_LEADERELECTIONREG_ELECTIONRESULT(-1, 5);
+constexpr UID WLTOKEN_LEADERELECTIONREG_LEADERHEARTBEAT(-1, 6);
+constexpr UID WLTOKEN_LEADERELECTIONREG_FORWARD(-1, 7);
+constexpr UID WLTOKEN_GENERATIONREG_READ(-1, 8);
+constexpr UID WLTOKEN_GENERATIONREG_WRITE(-1, 9);
+
 struct GenerationRegInterface {
 	constexpr static FileIdentifier file_identifier = 16726744;
 	RequestStream< struct GenerationRegReadRequest > read;
@@ -63,9 +70,13 @@ struct UniqueGeneration {
 		if (r.generation < generation) return false;
 		return uid < r.uid;
 	}
+	bool operator>(UniqueGeneration const& r) const { return r < *this; }
+	bool operator<=(UniqueGeneration const& r) const { return !(*this > r); }
+	bool operator>=(UniqueGeneration const& r) const { return !(*this < r); }
 	bool operator == (UniqueGeneration const& r) const {
 		return generation == r.generation && uid == r.uid;
 	}
+	bool operator!=(UniqueGeneration const& r) const { return !(*this == r); }
 	template <class Ar>
 	void serialize(Ar& ar) {
 		serializer(ar, generation, uid);
@@ -112,6 +123,7 @@ struct GenerationRegWriteRequest {
 
 struct LeaderElectionRegInterface : ClientLeaderRegInterface {
 	RequestStream< struct CandidacyRequest > candidacy;
+	RequestStream< struct ElectionResultRequest > electionResult;
 	RequestStream< struct LeaderHeartbeatRequest > leaderHeartbeat;
 	RequestStream< struct ForwardRequest > forward;
 
@@ -133,6 +145,22 @@ struct CandidacyRequest {
 	template <class Ar>
 	void serialize(Ar& ar) {
 		serializer(ar, key, myInfo, knownLeader, prevChangeID, reply);
+	}
+};
+
+struct ElectionResultRequest {
+	constexpr static FileIdentifier file_identifier = 11815465;
+	Key key;
+	vector<NetworkAddress> coordinators;
+	UID knownLeader;
+	ReplyPromise<Optional<LeaderInfo>> reply;
+
+	ElectionResultRequest() = default;
+	ElectionResultRequest(Key key, std::vector<NetworkAddress> coordinators, UID knownLeader) : key(key), coordinators(std::move(coordinators)), knownLeader(knownLeader) {}
+
+	template <class Ar>
+	void serialize(Ar& ar) {
+		serializer(ar, key, coordinators, knownLeader, reply);
 	}
 };
 

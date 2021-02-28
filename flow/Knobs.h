@@ -25,15 +25,17 @@
 #include "flow/Platform.h"
 
 #include <map>
+#include <set>
 #include <string>
 #include <stdint.h>
 
 class Knobs {
 public:
 	bool setKnob( std::string const& name, std::string const& value ); // Returns true if the knob name is known, false if it is unknown
-	void trace();
+	void trace() const;
 
 protected:
+	Knobs()=default;
 	void initKnob( double& knob, double value, std::string const& name );
 	void initKnob( int64_t& knob, int64_t value, std::string const& name );
 	void initKnob( int& knob, int value, std::string const& name );
@@ -45,6 +47,7 @@ protected:
 	std::map<std::string, int*> int_knobs;
 	std::map<std::string, std::string*> string_knobs;
 	std::map<std::string, bool*> bool_knobs;
+	std::set<std::string> explicitlySetKnobs;
 };
 
 class FlowKnobs : public Knobs {
@@ -67,10 +70,17 @@ public:
 	double HUGE_ARENA_LOGGING_BYTES;
 	double HUGE_ARENA_LOGGING_INTERVAL;
 
-	//slow task profiling
-	double SLOWTASK_PROFILING_INTERVAL;
+	bool WRITE_TRACING_ENABLED;
+	int TRACING_UDP_LISTENER_PORT;
+
+	//run loop profiling
+	double RUN_LOOP_PROFILING_INTERVAL;
+	double SLOWTASK_PROFILING_LOG_INTERVAL;
 	double SLOWTASK_PROFILING_MAX_LOG_INTERVAL;
 	double SLOWTASK_PROFILING_LOG_BACKOFF;
+	double SATURATION_PROFILING_LOG_INTERVAL;
+	double SATURATION_PROFILING_MAX_LOG_INTERVAL;
+	double SATURATION_PROFILING_LOG_BACKOFF;
 
 	//connectionMonitor
 	double CONNECTION_MONITOR_LOOP_TIME;
@@ -87,13 +97,23 @@ public:
 	double MAX_RECONNECTION_TIME;
 	double RECONNECTION_TIME_GROWTH_RATE;
 	double RECONNECTION_RESET_TIME;
+	double ALWAYS_ACCEPT_DELAY;
 	int ACCEPT_BATCH_SIZE;
+	double INCOMPATIBLE_PEER_DELAY_BEFORE_LOGGING;
+	double PING_LOGGING_INTERVAL;
+	int PING_SAMPLE_AMOUNT;
+	int NETWORK_CONNECT_SAMPLE_AMOUNT;
 
 	int TLS_CERT_REFRESH_DELAY_SECONDS;
 	double TLS_SERVER_CONNECTION_THROTTLE_TIMEOUT;
 	double TLS_CLIENT_CONNECTION_THROTTLE_TIMEOUT;
 	int TLS_SERVER_CONNECTION_THROTTLE_ATTEMPTS;
 	int TLS_CLIENT_CONNECTION_THROTTLE_ATTEMPTS;
+	int TLS_CLIENT_HANDSHAKE_THREADS;
+	int TLS_SERVER_HANDSHAKE_THREADS;
+	int TLS_HANDSHAKE_THREAD_STACKSIZE;
+	int TLS_MALLOC_ARENA_MAX;
+	int TLS_HANDSHAKE_LIMIT;
 
 	int NETWORK_TEST_CLIENT_COUNT;
 	int NETWORK_TEST_REPLY_SIZE;
@@ -114,6 +134,7 @@ public:
 	double TOO_MANY_CONNECTIONS_CLOSED_RESET_DELAY;
 	int TOO_MANY_CONNECTIONS_CLOSED_TIMEOUT;
 	int PEER_UNAVAILABLE_FOR_LONG_TIME_TIMEOUT;
+	int FLOW_CACHEDFILE_WRITE_IO_SIZE;
 
 	//AsyncFileEIO
 	int EIO_MAX_PARALLELISM;
@@ -132,6 +153,7 @@ public:
 	//GenericActors
 	double BUGGIFY_FLOW_LOCK_RELEASE_DELAY;
 	int LOW_PRIORITY_DELAY_COUNT;
+	double LOW_PRIORITY_MAX_DELAY;
 
 	//IAsyncFile
 	int64_t INCREMENTAL_DELETE_TRUNCATE_AMOUNT;
@@ -144,7 +166,9 @@ public:
 	double SLOW_LOOP_SAMPLING_RATE;
 	int64_t TSC_YIELD_TIME;
 	int64_t REACTOR_FLAGS;
+	double MIN_LOGGED_PRIORITY_BUSY_FRACTION;
 	int CERT_FILE_MAX_SIZE;
+	int READY_QUEUE_RESERVED_SIZE;
 
 	//Network
 	int64_t PACKET_LIMIT;
@@ -155,8 +179,6 @@ public:
 	int MIN_PACKET_BUFFER_FREE_BYTES;
 	int FLOW_TCP_NODELAY;
 	int FLOW_TCP_QUICKACK;
-	int UNRESTRICTED_HANDSHAKE_LIMIT;
-	int BOUNDED_HANDSHAKE_LIMIT;
 
 	//Sim2
 	//FIMXE: more parameters could be factored out
@@ -177,6 +199,7 @@ public:
 	double TRACE_RETRY_OPEN_INTERVAL;
 	int MIN_TRACE_SEVERITY;
 	int MAX_TRACE_SUPPRESSIONS;
+	bool TRACE_DATETIME_ENABLED;
 	int TRACE_SYNC_ENABLED;
 	int TRACE_EVENT_METRIC_UNITS_PER_SAMPLE;
 	int TRACE_EVENT_THROTTLER_SAMPLE_EXPIRY;
@@ -218,10 +241,25 @@ public:
 	double FUTURE_VERSION_BACKOFF_GROWTH;
 	int LOAD_BALANCE_MAX_BAD_OPTIONS;
 	bool LOAD_BALANCE_PENALTY_IS_BAD;
+	double BASIC_LOAD_BALANCE_UPDATE_RATE;
+	double BASIC_LOAD_BALANCE_MAX_CHANGE;
+	double BASIC_LOAD_BALANCE_MAX_PROB;
+	int BASIC_LOAD_BALANCE_BUCKETS;
+	int BASIC_LOAD_BALANCE_COMPUTE_PRECISION;
+	double BASIC_LOAD_BALANCE_MIN_REQUESTS;
+	double BASIC_LOAD_BALANCE_MIN_CPU;
 
-	FlowKnobs(bool randomize = false, bool isSimulated = false);
+	// Health Monitor
+	int FAILURE_DETECTION_DELAY;
+	bool HEALTH_MONITOR_MARK_FAILED_UNSTABLE_CONNECTIONS;
+	int HEALTH_MONITOR_CLIENT_REQUEST_INTERVAL_SECS;
+	int HEALTH_MONITOR_CONNECTION_MAX_CLOSED;
+
+	FlowKnobs();
+	void initialize(bool randomize = false, bool isSimulated = false);
 };
 
+extern std::unique_ptr<FlowKnobs> globalFlowKnobs;
 extern FlowKnobs const* FLOW_KNOBS;
 
 #endif

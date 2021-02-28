@@ -94,3 +94,7 @@ flow/coveragetool/obj
 .envrc
 .DS_Store
 temp/
+/versions.target
+/compile_commands.json
+/.ccls-cache
+.clangd/

@@ -40,22 +40,21 @@ struct KillRegionWorkload : TestWorkload {
 		g_simulator.usableRegions = 1;
 	}
 
-	virtual std::string description() { return "KillRegionWorkload"; }
-	virtual Future<Void> setup( Database const& cx ) {
+	std::string description() const override { return "KillRegionWorkload"; }
+	Future<Void> setup(Database const& cx) override {
 		if(enabled) {
 			return _setup( this, cx );
 		}
 		return Void();
 	}
-	virtual Future<Void> start( Database const& cx ) {
+	Future<Void> start(Database const& cx) override {
 		if(enabled) {
 			return killRegion( this, cx );
 		}
 		return Void();
 	}
-	virtual Future<bool> check( Database const& cx ) { return true; }
-	virtual void getMetrics( vector<PerfMetric>& m ) {
-	}
+	Future<bool> check(Database const& cx) override { return true; }
+	void getMetrics(vector<PerfMetric>& m) override {}
 
 	ACTOR static Future<Void> _setup( KillRegionWorkload *self, Database cx ) {
 		TraceEvent("ForceRecovery_DisablePrimaryBegin");
@@ -63,6 +62,13 @@ struct KillRegionWorkload : TestWorkload {
 		TraceEvent("ForceRecovery_WaitForRemote");
 		wait( waitForPrimaryDC(cx, LiteralStringRef("1")) );
 		TraceEvent("ForceRecovery_DisablePrimaryComplete");
+		return Void();
+	}
+
+	ACTOR static Future<Void> waitForStorageRecovered( KillRegionWorkload *self ) {
+		while( self->dbInfo->get().recoveryState < RecoveryState::STORAGE_RECOVERED ) {
+			wait( self->dbInfo->onChange() );
+		}
 		return Void();
 	}
 
@@ -94,10 +100,13 @@ struct KillRegionWorkload : TestWorkload {
 		TraceEvent("ForceRecovery_GotConfig").detail("Conf", conf.toString());
 
 		if(conf.usableRegions>1) {
-			//only needed if force recovery was unnecessary and we killed the secondary
-			wait( success( changeConfig( cx, g_simulator.disablePrimary + " repopulate_anti_quorum=1", true ) ) );
-			while( self->dbInfo->get().recoveryState < RecoveryState::STORAGE_RECOVERED ) {
-				wait( self->dbInfo->onChange() );
+			loop {
+				//only needed if force recovery was unnecessary and we killed the secondary
+				wait( success( changeConfig( cx, g_simulator.disablePrimary + " repopulate_anti_quorum=1", true ) ) );
+				choose {
+					when( wait( waitForStorageRecovered(self) ) ) { break; }
+					when( wait( delay(300.0) ) ) { }
+				}
 			}
 			wait( success( changeConfig( cx, "usable_regions=1", true ) ) );
 		}

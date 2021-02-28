@@ -23,40 +23,42 @@
 #define FDBCLIENT_CLIENTLOGEVENTS_H
 
 namespace FdbClientLogEvents {
-	typedef int EventType;
-	enum {	GET_VERSION_LATENCY	= 0,
-			GET_LATENCY			= 1,
-			GET_RANGE_LATENCY	= 2,
-			COMMIT_LATENCY		= 3,
-			ERROR_GET			= 4,
-			ERROR_GET_RANGE		= 5,
-			ERROR_COMMIT		= 6,
+enum class EventType {
+	GET_VERSION_LATENCY = 0,
+	GET_LATENCY = 1,
+	GET_RANGE_LATENCY = 2,
+	COMMIT_LATENCY = 3,
+	ERROR_GET = 4,
+	ERROR_GET_RANGE = 5,
+	ERROR_COMMIT = 6,
+	UNSET
+};
 
-			EVENTTYPEEND	// End of EventType
-	     };
+enum class TransactionPriorityType { PRIORITY_DEFAULT = 0, PRIORITY_BATCH = 1, PRIORITY_IMMEDIATE = 2, UNSET };
 
-	typedef int TrasactionPriorityType;
-	enum {
-		PRIORITY_DEFAULT   = 0,
-		PRIORITY_BATCH     = 1,
-		PRIORITY_IMMEDIATE = 2,
-		PRIORITY_END
-	};
+struct Event {
+	Event(EventType t, double ts, const Optional<Standalone<StringRef>>& dc) : type(t), startTs(ts) {
+		if (dc.present()) dcId = dc.get();
+	}
+	Event() {}
 
-	struct Event {
-		Event(EventType t, double ts) : type(t), startTs(ts) { }
-		Event() { }
+	template <typename Ar>
+	Ar& serialize(Ar& ar) {
+		if (ar.protocolVersion().version() >= (uint64_t)0x0FDB00B063010001LL) {
+			return serializer(ar, type, startTs, dcId);
+		} else {
+			return serializer(ar, type, startTs);
+		}
+	}
 
-		template <typename Ar>	Ar& serialize(Ar &ar) { return serializer(ar, type, startTs); }
+	EventType type{ EventType::UNSET };
+	double startTs{ 0 };
+	Key dcId{};
 
-		EventType type{ EVENTTYPEEND };
-		double startTs{ 0 };
-
-		void logEvent(std::string id, int maxFieldLength) const {}
+	void logEvent(std::string id, int maxFieldLength) const {}
 	};
 
 	struct EventGetVersion : public Event {
-		EventGetVersion(double ts, double lat) : Event(GET_VERSION_LATENCY, ts), latency(lat) { }
 		EventGetVersion() { }
 
 		template <typename Ar>	Ar& serialize(Ar &ar) {
@@ -77,17 +79,6 @@ namespace FdbClientLogEvents {
 
 	// Version V2 of EventGetVersion starting at 6.2
 	struct EventGetVersion_V2 : public Event {
-		EventGetVersion_V2(double ts, double lat, uint32_t type) : Event(GET_VERSION_LATENCY, ts), latency(lat) {
-			if(type == GetReadVersionRequest::PRIORITY_DEFAULT) {
-				priorityType = PRIORITY_DEFAULT;
-			} else if (type == GetReadVersionRequest::PRIORITY_BATCH) {
-				priorityType = PRIORITY_BATCH;
-			} else if (type == GetReadVersionRequest::PRIORITY_SYSTEM_IMMEDIATE){
-				priorityType = PRIORITY_IMMEDIATE;
-			} else {
-				ASSERT(0);
-			}
-		 }
 		EventGetVersion_V2() { }
 
 		template <typename Ar>	Ar& serialize(Ar &ar) {
@@ -98,9 +89,9 @@ namespace FdbClientLogEvents {
 		}
 
 		double latency;
-		TrasactionPriorityType priorityType {PRIORITY_END};
+	    TransactionPriorityType priorityType{ TransactionPriorityType::UNSET };
 
-		void logEvent(std::string id, int maxFieldLength) const {
+	    void logEvent(std::string id, int maxFieldLength) const {
 			TraceEvent("TransactionTrace_GetVersion")
 			.detail("TransactionID", id)
 			.detail("Latency", latency)
@@ -108,9 +99,52 @@ namespace FdbClientLogEvents {
 		}
 	};
 
+	// Version V3 of EventGetVersion starting at 6.3
+	struct EventGetVersion_V3 : public Event {
+	    EventGetVersion_V3(double ts, const Optional<Standalone<StringRef>>& dcId, double lat,
+	                       TransactionPriority priority, Version version)
+	      : Event(EventType::GET_VERSION_LATENCY, ts, dcId), latency(lat), readVersion(version) {
+		    switch(priority) {
+				// Unfortunately, the enum serialized here disagrees with the enum used elsewhere for the values used by each priority
+				case TransactionPriority::IMMEDIATE:
+			        priorityType = TransactionPriorityType::PRIORITY_IMMEDIATE;
+			        break;
+				case TransactionPriority::DEFAULT:
+			        priorityType = TransactionPriorityType::PRIORITY_DEFAULT;
+			        break;
+				case TransactionPriority::BATCH:
+			        priorityType = TransactionPriorityType::PRIORITY_BATCH;
+			        break;
+				default:
+					ASSERT(false);
+			}
+	    }
+	    EventGetVersion_V3() { }
+
+		template <typename Ar>	Ar& serialize(Ar &ar) {
+			if (!ar.isDeserializing)
+				return serializer(Event::serialize(ar), latency, priorityType, readVersion);
+			else
+				return serializer(ar, latency, priorityType, readVersion);
+		}
+
+		double latency;
+	    TransactionPriorityType priorityType{ TransactionPriorityType::UNSET };
+	    Version readVersion;
+
+		void logEvent(std::string id, int maxFieldLength) const {
+			TraceEvent("TransactionTrace_GetVersion")
+			.detail("TransactionID", id)
+			.detail("Latency", latency)
+			.detail("PriorityType", priorityType)
+			.detail("ReadVersion", readVersion);
+		}
+	};
+
 	struct EventGet : public Event {
-		EventGet(double ts, double lat, int size, const KeyRef &in_key) : Event(GET_LATENCY, ts), latency(lat), valueSize(size), key(in_key) { }
-		EventGet() { }
+	    EventGet(double ts, const Optional<Standalone<StringRef>>& dcId, double lat, int size, const KeyRef& in_key)
+	      : Event(EventType::GET_LATENCY, ts, dcId), latency(lat), valueSize(size), key(in_key) {}
+	    EventGet() { }
 
 		template <typename Ar>	Ar& serialize(Ar &ar) {
 			if (!ar.isDeserializing)
@@ -135,8 +169,11 @@ namespace FdbClientLogEvents {
 	};
 
 	struct EventGetRange : public Event {
-		EventGetRange(double ts, double lat, int size, const KeyRef &start_key, const KeyRef & end_key) : Event(GET_RANGE_LATENCY, ts), latency(lat), rangeSize(size), startKey(start_key), endKey(end_key) { }
-		EventGetRange() { }
+	    EventGetRange(double ts, const Optional<Standalone<StringRef>>& dcId, double lat, int size,
+	                  const KeyRef& start_key, const KeyRef& end_key)
+	      : Event(EventType::GET_RANGE_LATENCY, ts, dcId), latency(lat), rangeSize(size), startKey(start_key),
+	        endKey(end_key) {}
+	    EventGetRange() { }
 
 		template <typename Ar>	Ar& serialize(Ar &ar) {
 			if (!ar.isDeserializing)
@@ -163,7 +200,6 @@ namespace FdbClientLogEvents {
 	};
 
 	struct EventCommit : public Event {
-		EventCommit(double ts, double lat, int mut, int bytes, const CommitTransactionRequest &commit_req) : Event(COMMIT_LATENCY, ts), latency(lat), numMutations(mut), commitBytes(bytes), req(commit_req) { }
 		EventCommit() { }
 
 		template <typename Ar>	Ar& serialize(Ar &ar) {
@@ -213,9 +249,67 @@ namespace FdbClientLogEvents {
 		}
 	};
 
+	// Version V2 of EventGetVersion starting at 6.3
+	struct EventCommit_V2 : public Event {
+	    EventCommit_V2(double ts, const Optional<Standalone<StringRef>>& dcId, double lat, int mut, int bytes,
+	                   Version version, const CommitTransactionRequest& commit_req)
+	      : Event(EventType::COMMIT_LATENCY, ts, dcId), latency(lat), numMutations(mut), commitBytes(bytes),
+	        commitVersion(version), req(commit_req) {}
+	    EventCommit_V2() { }
+
+		template <typename Ar>	Ar& serialize(Ar &ar) {
+			if (!ar.isDeserializing)
+				return serializer(Event::serialize(ar), latency, numMutations, commitBytes, commitVersion, req.transaction, req.arena);
+			else
+				return serializer(ar, latency, numMutations, commitBytes, commitVersion, req.transaction, req.arena);
+		}
+
+		double latency;
+		int numMutations;
+		int commitBytes;
+		Version commitVersion;
+		CommitTransactionRequest req; // Only CommitTransactionRef and Arena object within CommitTransactionRequest is serialized
+
+		void logEvent(std::string id, int maxFieldLength) const {
+			for (auto &read_range : req.transaction.read_conflict_ranges) {
+				TraceEvent("TransactionTrace_Commit_ReadConflictRange")
+				.setMaxEventLength(-1)
+				.detail("TransactionID", id)
+				.setMaxFieldLength(maxFieldLength)
+				.detail("Begin", read_range.begin)
+				.detail("End", read_range.end);
+			}
+
+			for (auto &write_range : req.transaction.write_conflict_ranges) {
+				TraceEvent("TransactionTrace_Commit_WriteConflictRange")
+				.setMaxEventLength(-1)
+				.detail("TransactionID", id)
+				.setMaxFieldLength(maxFieldLength)
+				.detail("Begin", write_range.begin)
+				.detail("End", write_range.end);
+			}
+
+			for (auto &mutation : req.transaction.mutations) {
+				TraceEvent("TransactionTrace_Commit_Mutation")
+				.setMaxEventLength(-1)
+				.detail("TransactionID", id)
+				.setMaxFieldLength(maxFieldLength)
+				.detail("Mutation", mutation.toString());
+			}
+
+			TraceEvent("TransactionTrace_Commit")
+			.detail("TransactionID", id)
+			.detail("CommitVersion", commitVersion)
+			.detail("Latency", latency)
+			.detail("NumMutations", numMutations)
+			.detail("CommitSizeBytes", commitBytes);
+		}
+	};
+
 	struct EventGetError : public Event {
-		EventGetError(double ts, int err_code, const KeyRef &in_key) : Event(ERROR_GET, ts), errCode(err_code), key(in_key) { }
-		EventGetError() { }
+	    EventGetError(double ts, const Optional<Standalone<StringRef>>& dcId, int err_code, const KeyRef& in_key)
+	      : Event(EventType::ERROR_GET, ts, dcId), errCode(err_code), key(in_key) {}
+	    EventGetError() { }
 
 		template <typename Ar>	Ar& serialize(Ar &ar) {
 			if (!ar.isDeserializing)
@@ -238,8 +332,10 @@ namespace FdbClientLogEvents {
 	};
 
 	struct EventGetRangeError : public Event {
-		EventGetRangeError(double ts, int err_code, const KeyRef &start_key, const KeyRef & end_key) : Event(ERROR_GET_RANGE, ts), errCode(err_code), startKey(start_key), endKey(end_key) { }
-		EventGetRangeError() { }
+	    EventGetRangeError(double ts, const Optional<Standalone<StringRef>>& dcId, int err_code,
+	                       const KeyRef& start_key, const KeyRef& end_key)
+	      : Event(EventType::ERROR_GET_RANGE, ts, dcId), errCode(err_code), startKey(start_key), endKey(end_key) {}
+	    EventGetRangeError() { }
 
 		template <typename Ar>	Ar& serialize(Ar &ar) {
 			if (!ar.isDeserializing)
@@ -264,8 +360,10 @@ namespace FdbClientLogEvents {
 	};
 
 	struct EventCommitError : public Event {
-		EventCommitError(double ts, int err_code, const CommitTransactionRequest &commit_req) : Event(ERROR_COMMIT, ts), errCode(err_code), req(commit_req) { }
-		EventCommitError() { }
+	    EventCommitError(double ts, const Optional<Standalone<StringRef>>& dcId, int err_code,
+	                     const CommitTransactionRequest& commit_req)
+	      : Event(EventType::ERROR_COMMIT, ts, dcId), errCode(err_code), req(commit_req) {}
+	    EventCommitError() { }
 
 		template <typename Ar>	Ar& serialize(Ar &ar) {
 			if (!ar.isDeserializing)

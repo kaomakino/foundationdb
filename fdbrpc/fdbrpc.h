@@ -28,7 +28,7 @@
 #include "fdbrpc/FailureMonitor.h"
 #include "fdbrpc/networksender.actor.h"
 
-struct FlowReceiver : private NetworkMessageReceiver {
+struct FlowReceiver : public NetworkMessageReceiver {
 	// Common endpoint code for NetSAV<> and NetNotifiedQueue<>
 
 	FlowReceiver() : m_isLocalEndpoint(false), m_stream(false) {
@@ -60,6 +60,18 @@ struct FlowReceiver : private NetworkMessageReceiver {
 		return endpoint;
 	}
 
+	void setEndpoint(Endpoint const& e) {
+		ASSERT(!endpoint.isValid());
+		m_isLocalEndpoint = true;
+		endpoint = e;
+	}
+
+	void setPeerCompatibilityPolicy(const PeerCompatibilityPolicy& policy) { peerCompatibilityPolicy_ = policy; }
+
+	PeerCompatibilityPolicy peerCompatibilityPolicy() const override {
+		return peerCompatibilityPolicy_.orDefault(NetworkMessageReceiver::peerCompatibilityPolicy());
+	}
+
 	void makeWellKnownEndpoint(Endpoint::Token token, TaskPriority taskID) {
 		ASSERT(!endpoint.isValid());
 		m_isLocalEndpoint = true;
@@ -68,13 +80,14 @@ struct FlowReceiver : private NetworkMessageReceiver {
 	}
 
 private:
+	Optional<PeerCompatibilityPolicy> peerCompatibilityPolicy_;
 	Endpoint endpoint;
 	bool m_isLocalEndpoint;
 	bool m_stream;
 };
 
 template <class T>
-struct NetSAV : SAV<T>, FlowReceiver, FastAllocated<NetSAV<T>> {
+struct NetSAV final : SAV<T>, FlowReceiver, FastAllocated<NetSAV<T>> {
 	using FastAllocated<NetSAV<T>>::operator new;
 	using FastAllocated<NetSAV<T>>::operator delete;
 
@@ -83,8 +96,8 @@ struct NetSAV : SAV<T>, FlowReceiver, FastAllocated<NetSAV<T>> {
 	  : SAV<T>(futures, promises), FlowReceiver(remoteEndpoint, false) {
 	}
 
-	virtual void destroy() { delete this; }
-	virtual void receive(ArenaObjectReader& reader) {
+	void destroy() override { delete this; }
+	void receive(ArenaObjectReader& reader) override {
 		if (!SAV<T>::canBeSet()) return;
 		this->addPromiseRef();
 		ErrorOr<EnsureTable<T>> message;
@@ -97,11 +110,8 @@ struct NetSAV : SAV<T>, FlowReceiver, FastAllocated<NetSAV<T>> {
 	}
 };
 
-
-
 template <class T>
-class ReplyPromise sealed : public ComposedIdentifier<T, 0x2>
-{
+class ReplyPromise final : public ComposedIdentifier<T, 1> {
 public:
 	template <class U>
 	void send(U&& value) const {
@@ -112,10 +122,13 @@ public:
 
 	Future<T> getFuture() const { sav->addFutureRef(); return Future<T>(sav); }
 	bool isSet() { return sav->isSet(); }
-	bool isValid() const { return sav != NULL; }
+	bool isValid() const { return sav != nullptr; }
 	ReplyPromise() : sav(new NetSAV<T>(0, 1)) {}
+	explicit ReplyPromise(const PeerCompatibilityPolicy& policy) : ReplyPromise() {
+		sav->setPeerCompatibilityPolicy(policy);
+	}
 	ReplyPromise(const ReplyPromise& rhs) : sav(rhs.sav) { sav->addPromiseRef(); }
-	ReplyPromise(ReplyPromise&& rhs) BOOST_NOEXCEPT : sav(rhs.sav) { rhs.sav = 0; }
+	ReplyPromise(ReplyPromise&& rhs) noexcept : sav(rhs.sav) { rhs.sav = 0; }
 	~ReplyPromise() { if (sav) sav->delPromiseRef(); }
 
 	ReplyPromise(const Endpoint& endpoint) : sav(new NetSAV<T>(0, 1, endpoint)) {}
@@ -126,7 +139,7 @@ public:
 		if (sav) sav->delPromiseRef();
 		sav = rhs.sav;
 	}
-	void operator=(ReplyPromise && rhs) BOOST_NOEXCEPT {
+	void operator=(ReplyPromise&& rhs) noexcept {
 		if (sav != rhs.sav) {
 			if (sav) sav->delPromiseRef();
 			sav = rhs.sav;
@@ -141,7 +154,7 @@ public:
 	}
 
 	// Beware, these operations are very unsafe
-	SAV<T>* extractRawPointer() { auto ptr = sav; sav = NULL; return ptr; }
+	SAV<T>* extractRawPointer() { auto ptr = sav; sav = nullptr; return ptr; }
 	explicit ReplyPromise<T>(SAV<T>* ptr) : sav(ptr) {}
 
 	int getFutureReferenceCount() const { return sav->getFutureReferenceCount(); }
@@ -209,12 +222,8 @@ void setReplyPriority(ReplyPromise<Reply> & p, TaskPriority taskID) { p.getEndpo
 template <class Reply>
 void setReplyPriority(const ReplyPromise<Reply> & p, TaskPriority taskID) { p.getEndpoint(taskID); }
 
-
-
-
-
 template <class T>
-struct NetNotifiedQueue : NotifiedQueue<T>, FlowReceiver, FastAllocated<NetNotifiedQueue<T>> {
+struct NetNotifiedQueue final : NotifiedQueue<T>, FlowReceiver, FastAllocated<NetNotifiedQueue<T>> {
 	using FastAllocated<NetNotifiedQueue<T>>::operator new;
 	using FastAllocated<NetNotifiedQueue<T>>::operator delete;
 
@@ -222,17 +231,16 @@ struct NetNotifiedQueue : NotifiedQueue<T>, FlowReceiver, FastAllocated<NetNotif
 	NetNotifiedQueue(int futures, int promises, const Endpoint& remoteEndpoint)
 	  : NotifiedQueue<T>(futures, promises), FlowReceiver(remoteEndpoint, true) {}
 
-	virtual void destroy() { delete this; }
-	virtual void receive(ArenaObjectReader& reader) {
+	void destroy() override { delete this; }
+	void receive(ArenaObjectReader& reader) override {
 		this->addPromiseRef();
 		T message;
 		reader.deserialize(message);
 		this->send(std::move(message));
 		this->delPromiseRef();
 	}
-	virtual bool isStream() const { return true; }
+	bool isStream() const override { return true; }
 };
-
 
 template <class T>
 class RequestStream {
@@ -240,13 +248,15 @@ public:
 	// stream.send( request )
 	//   Unreliable at most once delivery: Delivers request unless there is a connection failure (zero or one times)
 
-	void send(const T& value) const {
+	template<class U>
+	void send(U && value) const {
 		if (queue->isRemoteEndpoint()) {
-			FlowTransport::transport().sendUnreliable(SerializeSource<T>(value), getEndpoint(), true);
+			FlowTransport::transport().sendUnreliable(SerializeSource<T>(std::forward<U>(value)), getEndpoint(), true);
 		}
 		else
-			queue->send(value);
+			queue->send(std::forward<U>(value));
 	}
+
 	/*void sendError(const Error& error) const {
 	ASSERT( !queue->isRemoteEndpoint() );
 	queue->sendError(error);
@@ -354,14 +364,17 @@ public:
 
 	FutureStream<T> getFuture() const { queue->addFutureRef(); return FutureStream<T>(queue); }
 	RequestStream() : queue(new NetNotifiedQueue<T>(0, 1)) {}
+	explicit RequestStream(PeerCompatibilityPolicy policy) : RequestStream() {
+		queue->setPeerCompatibilityPolicy(policy);
+	}
 	RequestStream(const RequestStream& rhs) : queue(rhs.queue) { queue->addPromiseRef(); }
-	RequestStream(RequestStream&& rhs) BOOST_NOEXCEPT : queue(rhs.queue) { rhs.queue = 0; }
+	RequestStream(RequestStream&& rhs) noexcept : queue(rhs.queue) { rhs.queue = 0; }
 	void operator=(const RequestStream& rhs) {
 		rhs.queue->addPromiseRef();
 		if (queue) queue->delPromiseRef();
 		queue = rhs.queue;
 	}
-	void operator=(RequestStream&& rhs) BOOST_NOEXCEPT {
+	void operator=(RequestStream&& rhs) noexcept {
 		if (queue != rhs.queue) {
 			if (queue) queue->delPromiseRef();
 			queue = rhs.queue;
@@ -382,6 +395,10 @@ public:
 	bool operator == (const RequestStream<T>& rhs) const { return queue == rhs.queue; }
 	bool isEmpty() const { return !queue->isReady(); }
 	uint32_t size() const { return queue->size(); }
+
+	std::pair<FlowReceiver*, TaskPriority> getReceiver( TaskPriority taskID = TaskPriority::DefaultEndpoint ) {
+		return std::make_pair((FlowReceiver*)queue, taskID);
+	}
 
 private:
 	NetNotifiedQueue<T>* queue;

@@ -27,6 +27,7 @@
 #include "fdbclient/ThreadSafeTransaction.h"
 #include "flow/ActorCollection.h"
 #include "fdbserver/workloads/workloads.actor.h"
+#include "flow/Arena.h"
 #include "flow/actorcompiler.h"  // This must be the last #include.
 
 namespace ph = std::placeholders;
@@ -59,7 +60,9 @@ struct ExceptionContract {
 			e.code() == error_code_transaction_cancelled ||
 			e.code() == error_code_key_too_large ||
 			e.code() == error_code_value_too_large ||
-			e.code() == error_code_process_behind)
+			e.code() == error_code_process_behind ||
+			e.code() == error_code_batch_transaction_throttled ||
+			e.code() == error_code_tag_throttled)
 		{
 			return;
 		}
@@ -112,6 +115,8 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 	KeyRange conflictRange;
 	unsigned int operationId;
 	int64_t maximumTotalData;
+	bool specialKeysRelaxed;
+	bool specialKeysWritesEnabled;
 
 	bool success;
 
@@ -127,6 +132,9 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 		adjacentKeys = deterministicRandom()->coinflip();
 		useSystemKeys = deterministicRandom()->coinflip();
 		initialKeyDensity = deterministicRandom()->random01(); // This fraction of keys are present before the first transaction (and after an unknown result)
+		specialKeysRelaxed = deterministicRandom()->coinflip();
+		// Only enable special keys writes when allowed to access system keys
+		specialKeysWritesEnabled = useSystemKeys && deterministicRandom()->coinflip();
 
 		// See https://github.com/apple/foundationdb/issues/2424
 		if (BUGGIFY) {
@@ -151,37 +159,35 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 		maxClearSize = 1<<deterministicRandom()->randomInt(0, 20);
 		conflictRange = KeyRangeRef( LiteralStringRef("\xfe"), LiteralStringRef("\xfe\x00") );
 		TraceEvent("FuzzApiCorrectnessConfiguration")
-			.detail("Nodes", nodes)
-			.detail("InitialKeyDensity", initialKeyDensity)
-			.detail("AdjacentKeys", adjacentKeys)
-			.detail("ValueSizeMin", valueSizeRange.first)
-			.detail("ValueSizeRange", valueSizeRange.second)
-			.detail("MaxClearSize", maxClearSize)
-			.detail("UseSystemKeys", useSystemKeys);
+		    .detail("Nodes", nodes)
+		    .detail("InitialKeyDensity", initialKeyDensity)
+		    .detail("AdjacentKeys", adjacentKeys)
+		    .detail("ValueSizeMin", valueSizeRange.first)
+		    .detail("ValueSizeRange", valueSizeRange.second)
+		    .detail("MaxClearSize", maxClearSize)
+		    .detail("UseSystemKeys", useSystemKeys)
+		    .detail("SpecialKeysRelaxed", specialKeysRelaxed)
+		    .detail("SpecialKeysWritesEnabled", specialKeysWritesEnabled);
 
 		TraceEvent("RemapEventSeverity").detail("TargetEvent", "LargePacketSent").detail("OriginalSeverity", SevWarnAlways).detail("NewSeverity", SevInfo);
 		TraceEvent("RemapEventSeverity").detail("TargetEvent", "LargePacketReceived").detail("OriginalSeverity", SevWarnAlways).detail("NewSeverity", SevInfo);
 		TraceEvent("RemapEventSeverity").detail("TargetEvent", "LargeTransaction").detail("OriginalSeverity", SevWarnAlways).detail("NewSeverity", SevInfo);
 	}
 
-	virtual std::string description() { return "FuzzApiCorrectness"; }
+	std::string description() const override { return "FuzzApiCorrectness"; }
 
-	virtual Future<Void> start( Database const& cx ) {
+	Future<Void> start(Database const& cx) override {
 		if( clientId == 0 ) {
 			return loadAndRun( cx, this );
 		}
 		return Void();
 	}
 
-	virtual Future<bool> check( Database const& cx ) {
-		return success;
-	}
+	Future<bool> check(Database const& cx) override { return success; }
 
-	Key getRandomKey() {
-		return getKeyForIndex( deterministicRandom()->randomInt(0, nodes ) );
-	}
+	Key getRandomKey() const { return getKeyForIndex(deterministicRandom()->randomInt(0, nodes)); }
 
-	Key getKeyForIndex( int idx ) {
+	Key getKeyForIndex(int idx) const {
 		idx += minNode;
 		if( adjacentKeys ) {
 			return Key( keyPrefix + std::string( idx, '\x00' ) );
@@ -190,11 +196,11 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 		}
 	}
 
-	Value getRandomValue() {
+	Value getRandomValue() const {
 		return Value( std::string( deterministicRandom()->randomInt(valueSizeRange.first,valueSizeRange.second+1), 'x' ) );
 	}
 
-	virtual void getMetrics( vector<PerfMetric>& m ) {
+	void getMetrics(vector<PerfMetric>& m) override {
 		//m.push_back( transactions.getMetric() );
 		//m.push_back( retries.getMetric() );
 	}
@@ -219,6 +225,9 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 						}
 						if( self->useSystemKeys )
 							tr->setOption( FDBTransactionOptions::ACCESS_SYSTEM_KEYS );
+						if (self->specialKeysRelaxed) tr->setOption(FDBTransactionOptions::SPECIAL_KEY_SPACE_RELAXED);
+						if (self->specialKeysWritesEnabled)
+							tr->setOption(FDBTransactionOptions::SPECIAL_KEY_SPACE_ENABLE_WRITES);
 
 						int end = std::min(self->nodes, i+keysPerBatch );
 						tr->clear( KeyRangeRef( self->getKeyForIndex(i), self->getKeyForIndex(end) ) );
@@ -275,6 +284,12 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 				tr->setOption( FDBTransactionOptions::READ_AHEAD_DISABLE );
 			if( self->useSystemKeys ) {
 				tr->setOption( FDBTransactionOptions::ACCESS_SYSTEM_KEYS );
+			}
+			if (self->specialKeysRelaxed) {
+				tr->setOption(FDBTransactionOptions::SPECIAL_KEY_SPACE_RELAXED);
+			}
+			if (self->specialKeysWritesEnabled) {
+				tr->setOption(FDBTransactionOptions::SPECIAL_KEY_SPACE_ENABLE_WRITES);
 			}
 			tr->addWriteConflictRange( self->conflictRange );
 
@@ -409,7 +424,11 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 			for (size_t j = 0; j < key_size; ++j)
 				skey.append(1, (char) deterministicRandom()->randomInt(0, 256));
 
-			return Key(skey);
+			// 15% (= 20% * 75%) of the time generating keys after \xff\xff to test special keys code
+			if (deterministicRandom()->random01() < 0.2)
+				return Key(skey).withPrefix(specialKeys.begin);
+			else
+				return Key(skey);
 		}
 
 		static Value makeValue() {
@@ -539,12 +558,12 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 		BaseTestCallback(unsigned int id, FuzzApiCorrectnessWorkload *wl, const char *func)
 			: BaseTest<Subclass, Void>(id, wl, func) {}
 
-		ThreadFuture<value_type> createFuture(Reference<ITransaction> tr) {
+		ThreadFuture<value_type> createFuture(Reference<ITransaction> tr) override {
 			callback(tr);
 			return tr.castTo<ThreadSafeTransaction>()->checkDeferredError();
 		}
 
-		Void errorCheck(Reference<ITransaction> tr, value_type result) {
+		Void errorCheck(Reference<ITransaction> tr, value_type result) override {
 			callbackErrorCheck(tr);
 			return Void();
 		}
@@ -571,18 +590,18 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 
 		}
 
-		ThreadFuture<Version> createFuture(Reference<ITransaction> tr) {
+		ThreadFuture<Version> createFuture(Reference<ITransaction> tr) override {
 			tr->setVersion(v);
 			pre_steps.push_back(tr.castTo<ThreadSafeTransaction>()->checkDeferredError());
 			return tr->getReadVersion();
 		}
 
-		Void errorCheck(Reference<ITransaction> tr, value_type result) {
+		Void errorCheck(Reference<ITransaction> tr, value_type result) override {
 			ASSERT(v == result);
 			return Void();
 		}
 
-		void augmentTrace(TraceEvent &e) const {
+		void augmentTrace(TraceEvent& e) const override {
 			base_type::augmentTrace(e);
 			e.detail("Version", v);
 		}
@@ -595,17 +614,33 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 		TestGet(unsigned int id, FuzzApiCorrectnessWorkload *workload) : BaseTest(id, workload, "TestGet") {
 			key = makeKey();
 			contract = {
-				std::make_pair( error_code_key_outside_legal_range, ExceptionContract::requiredIf((key >= (workload->useSystemKeys ? systemKeys.end : normalKeys.end))) ),
-				std::make_pair( error_code_client_invalid_operation, ExceptionContract::Possible ),
-				std::make_pair( error_code_accessed_unreadable, ExceptionContract::Possible )
+				std::make_pair(error_code_key_outside_legal_range,
+				               ExceptionContract::requiredIf(
+				                   (key >= (workload->useSystemKeys ? systemKeys.end : normalKeys.end)) &&
+				                   !specialKeys.contains(key))),
+				std::make_pair(error_code_client_invalid_operation, ExceptionContract::Possible),
+				std::make_pair(error_code_accessed_unreadable, ExceptionContract::Possible),
+				std::make_pair(
+				    error_code_special_keys_no_module_found,
+				    ExceptionContract::possibleIf(specialKeys.contains(key) && !workload->specialKeysRelaxed)),
+				// Read this particular special key may throw timed_out
+				std::make_pair(error_code_timed_out,
+				               ExceptionContract::possibleIf(key == LiteralStringRef("\xff\xff/status/json"))),
+				// Read this particular special key may throw special_keys_api_failure
+				std::make_pair(
+				    error_code_special_keys_api_failure,
+				    ExceptionContract::possibleIf(
+				        key ==
+				        LiteralStringRef("auto_coordinators")
+				            .withPrefix(SpecialKeySpace::getModuleRange(SpecialKeySpace::MODULE::MANAGEMENT).begin)))
 			};
 		}
 
-		ThreadFuture<value_type> createFuture(Reference<ITransaction> tr) {
+		ThreadFuture<value_type> createFuture(Reference<ITransaction> tr) override {
 			return tr->get(key, deterministicRandom()->coinflip());
 		}
 
-		void augmentTrace(TraceEvent &e) const {
+		void augmentTrace(TraceEvent& e) const override {
 			base_type::augmentTrace(e);
 			e.detail("Key", printable(key));
 		}
@@ -624,11 +659,11 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 			};
 		}
 
-		ThreadFuture<value_type> createFuture(Reference<ITransaction> tr) {
+		ThreadFuture<value_type> createFuture(Reference<ITransaction> tr) override {
 			return tr->getKey(keysel, deterministicRandom()->coinflip());
 		}
 
-		void augmentTrace(TraceEvent &e) const {
+		void augmentTrace(TraceEvent& e) const override {
 			base_type::augmentTrace(e);
 			e.detail("KeySel", keysel.toString());
 		}
@@ -652,21 +687,33 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 					limit = deterministicRandom()->randomInt(0, INT_MAX)+1;
 			}
 
+			bool isSpecialKeyRange = specialKeys.contains(keysel1.getKey()) && specialKeys.begin <= keysel2.getKey() &&
+			                         keysel2.getKey() <= specialKeys.end;
+
 			contract = {
-				std::make_pair( error_code_range_limits_invalid, ExceptionContract::possibleButRequiredIf(limit < 0) ),
-				std::make_pair( error_code_client_invalid_operation, ExceptionContract::Possible ),
-				std::make_pair( error_code_key_outside_legal_range, ExceptionContract::requiredIf(
-							(keysel1.getKey() > (workload->useSystemKeys ? systemKeys.end : normalKeys.end)) ||
-							(keysel2.getKey() > (workload->useSystemKeys ? systemKeys.end : normalKeys.end))) ),
-				std::make_pair( error_code_accessed_unreadable, ExceptionContract::Possible )
+				std::make_pair(error_code_range_limits_invalid, ExceptionContract::possibleButRequiredIf(limit < 0)),
+				std::make_pair(error_code_client_invalid_operation, ExceptionContract::Possible),
+				std::make_pair(error_code_key_outside_legal_range,
+				               ExceptionContract::requiredIf(
+				                   ((keysel1.getKey() > (workload->useSystemKeys ? systemKeys.end : normalKeys.end)) ||
+				                    (keysel2.getKey() > (workload->useSystemKeys ? systemKeys.end : normalKeys.end))) &&
+				                   !isSpecialKeyRange)),
+				std::make_pair(error_code_special_keys_cross_module_read,
+				               ExceptionContract::possibleIf(isSpecialKeyRange && !workload->specialKeysRelaxed)),
+				std::make_pair(error_code_special_keys_no_module_found,
+				               ExceptionContract::possibleIf(isSpecialKeyRange && !workload->specialKeysRelaxed)),
+				// Read some special keys, e.g. status/json, can throw timed_out
+				std::make_pair(error_code_timed_out, ExceptionContract::possibleIf(isSpecialKeyRange)),
+				std::make_pair(error_code_special_keys_api_failure, ExceptionContract::possibleIf(isSpecialKeyRange)),
+				std::make_pair(error_code_accessed_unreadable, ExceptionContract::Possible)
 			};
 		}
 
-		ThreadFuture<value_type> createFuture(Reference<ITransaction> tr) {
+		ThreadFuture<value_type> createFuture(Reference<ITransaction> tr) override {
 			return tr->getRange(keysel1, keysel2, limit, deterministicRandom()->coinflip(), deterministicRandom()->coinflip());
 		}
 
-		void augmentTrace(TraceEvent &e) const {
+		void augmentTrace(TraceEvent& e) const override {
 			base_type::augmentTrace(e);
 			e.detail("KeySel1", keysel1.toString()).detail("KeySel2", keysel2.toString()).detail("Limit", limit);
 		}
@@ -681,21 +728,34 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 			keysel1 = makeKeySel();
 			keysel2 = makeKeySel();
 			limits = makeRangeLimits();
+
+			bool isSpecialKeyRange = specialKeys.contains(keysel1.getKey()) && specialKeys.begin <= keysel2.getKey() &&
+			                         keysel2.getKey() <= specialKeys.end;
+
 			contract = {
-				std::make_pair( error_code_range_limits_invalid, ExceptionContract::possibleButRequiredIf( !limits.isReached() && !limits.isValid()) ),
-				std::make_pair( error_code_client_invalid_operation, ExceptionContract::Possible ),
-				std::make_pair( error_code_key_outside_legal_range, ExceptionContract::requiredIf(
-							(keysel1.getKey() > (workload->useSystemKeys ? systemKeys.end : normalKeys.end)) ||
-							(keysel2.getKey() > (workload->useSystemKeys ? systemKeys.end : normalKeys.end))) ),
-				std::make_pair( error_code_accessed_unreadable, ExceptionContract::Possible )
+				std::make_pair(error_code_range_limits_invalid,
+				               ExceptionContract::possibleButRequiredIf(!limits.isReached() && !limits.isValid())),
+				std::make_pair(error_code_client_invalid_operation, ExceptionContract::Possible),
+				std::make_pair(error_code_key_outside_legal_range,
+				               ExceptionContract::requiredIf(
+				                   ((keysel1.getKey() > (workload->useSystemKeys ? systemKeys.end : normalKeys.end)) ||
+				                    (keysel2.getKey() > (workload->useSystemKeys ? systemKeys.end : normalKeys.end))) &&
+				                   !isSpecialKeyRange)),
+				std::make_pair(error_code_special_keys_cross_module_read,
+				               ExceptionContract::possibleIf(isSpecialKeyRange && !workload->specialKeysRelaxed)),
+				std::make_pair(error_code_special_keys_no_module_found,
+				               ExceptionContract::possibleIf(isSpecialKeyRange && !workload->specialKeysRelaxed)),
+				std::make_pair(error_code_timed_out, ExceptionContract::possibleIf(isSpecialKeyRange)),
+				std::make_pair(error_code_special_keys_api_failure, ExceptionContract::possibleIf(isSpecialKeyRange)),
+				std::make_pair(error_code_accessed_unreadable, ExceptionContract::Possible)
 			};
 		}
 
-		ThreadFuture<value_type> createFuture(Reference<ITransaction> tr) {
+		ThreadFuture<value_type> createFuture(Reference<ITransaction> tr) override {
 			return tr->getRange(keysel1, keysel2, limits, deterministicRandom()->coinflip(), deterministicRandom()->coinflip());
 		}
 
-		void augmentTrace(TraceEvent &e) const {
+		void augmentTrace(TraceEvent& e) const override {
 			base_type::augmentTrace(e);
 			e.detail("KeySel1", keysel1.toString()).detail("KeySel2", keysel2.toString());
 			std::stringstream ss;
@@ -721,23 +781,43 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 				else
 					limit = deterministicRandom()->randomInt(0, INT_MAX)+1;
 			}
+
+			bool isSpecialKeyRange = specialKeys.contains(key1) && specialKeys.begin <= key2 && key2 <= specialKeys.end;
+			// Read this particular special key may throw special_keys_api_failure
+			Key autoCoordinatorSpecialKey =
+			    LiteralStringRef("auto_coordinators")
+			        .withPrefix(SpecialKeySpace::getModuleRange(SpecialKeySpace::MODULE::MANAGEMENT).begin);
+			// Read this particular special key may throw timed_out
+			Key statusJsonSpecialKey = LiteralStringRef("\xff\xff/status/json");
+
 			contract = {
-				std::make_pair( error_code_inverted_range, ExceptionContract::requiredIf(key1 > key2) ),
-				std::make_pair( error_code_range_limits_invalid, ExceptionContract::possibleButRequiredIf(limit < 0) ),
-				std::make_pair( error_code_client_invalid_operation, ExceptionContract::Possible ),
-				std::make_pair( error_code_key_outside_legal_range, ExceptionContract::requiredIf(
-							(key1 > (workload->useSystemKeys ? systemKeys.end : normalKeys.end)) ||
-							(key2 > (workload->useSystemKeys ? systemKeys.end : normalKeys.end))) ),
-				std::make_pair( error_code_accessed_unreadable, ExceptionContract::Possible )
+				std::make_pair(error_code_inverted_range, ExceptionContract::requiredIf(key1 > key2)),
+				std::make_pair(error_code_range_limits_invalid, ExceptionContract::possibleButRequiredIf(limit < 0)),
+				std::make_pair(error_code_client_invalid_operation, ExceptionContract::Possible),
+				std::make_pair(error_code_key_outside_legal_range,
+				               ExceptionContract::requiredIf(
+				                   ((key1 > (workload->useSystemKeys ? systemKeys.end : normalKeys.end)) ||
+				                    (key2 > (workload->useSystemKeys ? systemKeys.end : normalKeys.end))) &&
+				                   !isSpecialKeyRange)),
+				std::make_pair(error_code_special_keys_cross_module_read,
+				               ExceptionContract::possibleIf(isSpecialKeyRange && !workload->specialKeysRelaxed)),
+				std::make_pair(error_code_special_keys_no_module_found,
+				               ExceptionContract::possibleIf(isSpecialKeyRange && !workload->specialKeysRelaxed)),
+				std::make_pair(error_code_timed_out, ExceptionContract::possibleIf(key1 <= statusJsonSpecialKey &&
+				                                                                   statusJsonSpecialKey < key2)),
+				std::make_pair(error_code_special_keys_api_failure,
+				               ExceptionContract::possibleIf(key1 <= autoCoordinatorSpecialKey &&
+				                                             autoCoordinatorSpecialKey < key2)),
+				std::make_pair(error_code_accessed_unreadable, ExceptionContract::Possible)
 			};
 		}
 
-		ThreadFuture<value_type> createFuture(Reference<ITransaction> tr) {
+		ThreadFuture<value_type> createFuture(Reference<ITransaction> tr) override {
 			return tr->getRange(KeyRangeRef(key1, key2),
 					limit, deterministicRandom()->coinflip(), deterministicRandom()->coinflip());
 		}
 
-		void augmentTrace(TraceEvent &e) const {
+		void augmentTrace(TraceEvent& e) const override {
 			base_type::augmentTrace(e);
 			e.detail("Key1", printable(key1)).detail("Key2", printable(key2)).detail("Limit", limit);
 		}
@@ -752,22 +832,41 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 			key1 = makeKey();
 			key2 = makeKey();
 			limits = makeRangeLimits();
+
+			bool isSpecialKeyRange = specialKeys.contains(key1) && specialKeys.begin <= key2 && key2 <= specialKeys.end;
+			Key autoCoordinatorSpecialKey =
+			    LiteralStringRef("auto_coordinators")
+			        .withPrefix(SpecialKeySpace::getModuleRange(SpecialKeySpace::MODULE::MANAGEMENT).begin);
+			Key statusJsonSpecialKey = LiteralStringRef("\xff\xff/status/json");
+
 			contract = {
-				std::make_pair( error_code_inverted_range, ExceptionContract::requiredIf(key1 > key2) ),
-				std::make_pair( error_code_range_limits_invalid, ExceptionContract::possibleButRequiredIf( !limits.isReached() && !limits.isValid()) ),
-				std::make_pair( error_code_client_invalid_operation, ExceptionContract::Possible ),
-				std::make_pair( error_code_key_outside_legal_range, ExceptionContract::requiredIf(
-							(key1 > (workload->useSystemKeys ? systemKeys.end : normalKeys.end)) ||
-							(key2 > (workload->useSystemKeys ? systemKeys.end : normalKeys.end))) ),
-				std::make_pair( error_code_accessed_unreadable, ExceptionContract::Possible )
+				std::make_pair(error_code_inverted_range, ExceptionContract::requiredIf(key1 > key2)),
+				std::make_pair(error_code_range_limits_invalid,
+				               ExceptionContract::possibleButRequiredIf(!limits.isReached() && !limits.isValid())),
+				std::make_pair(error_code_client_invalid_operation, ExceptionContract::Possible),
+				std::make_pair(error_code_key_outside_legal_range,
+				               ExceptionContract::requiredIf(
+				                   ((key1 > (workload->useSystemKeys ? systemKeys.end : normalKeys.end)) ||
+				                    (key2 > (workload->useSystemKeys ? systemKeys.end : normalKeys.end))) &&
+				                   !isSpecialKeyRange)),
+				std::make_pair(error_code_special_keys_cross_module_read,
+				               ExceptionContract::possibleIf(isSpecialKeyRange && !workload->specialKeysRelaxed)),
+				std::make_pair(error_code_special_keys_no_module_found,
+				               ExceptionContract::possibleIf(isSpecialKeyRange && !workload->specialKeysRelaxed)),
+				std::make_pair(error_code_timed_out, ExceptionContract::possibleIf(key1 <= statusJsonSpecialKey &&
+				                                                                   statusJsonSpecialKey < key2)),
+				std::make_pair(error_code_special_keys_api_failure,
+				               ExceptionContract::possibleIf((key1 <= autoCoordinatorSpecialKey) &&
+				                                             (autoCoordinatorSpecialKey < key2))),
+				std::make_pair(error_code_accessed_unreadable, ExceptionContract::Possible)
 			};
 		}
 
-		ThreadFuture<value_type> createFuture(Reference<ITransaction> tr) {
+		ThreadFuture<value_type> createFuture(Reference<ITransaction> tr) override {
 			return tr->getRange(KeyRangeRef(key1, key2), limits, deterministicRandom()->coinflip(), deterministicRandom()->coinflip());
 		}
 
-		void augmentTrace(TraceEvent &e) const {
+		void augmentTrace(TraceEvent& e) const override {
 			base_type::augmentTrace(e);
 			e.detail("Key1", printable(key1)).detail("Key2", printable(key2));
 			std::stringstream ss;
@@ -787,11 +886,11 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 			};
 		}
 
-		ThreadFuture<value_type> createFuture(Reference<ITransaction> tr) {
+		ThreadFuture<value_type> createFuture(Reference<ITransaction> tr) override {
 			return tr->getAddressesForKey(key);
 		}
 
-		void augmentTrace(TraceEvent &e) const {
+		void augmentTrace(TraceEvent& e) const override {
 			base_type::augmentTrace(e);
 			e.detail("Key", printable(key));
 		}
@@ -812,11 +911,9 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 			};
 		}
 
-		void callback(Reference<ITransaction> tr) {
-			tr->addReadConflictRange(KeyRangeRef(key1, key2));
-		}
+		void callback(Reference<ITransaction> tr) override { tr->addReadConflictRange(KeyRangeRef(key1, key2)); }
 
-		void augmentTrace(TraceEvent &e) const {
+		void augmentTrace(TraceEvent& e) const override {
 			base_type::augmentTrace(e);
 			e.detail("Key1", printable(key1)).detail("Key2", printable(key2));
 		}
@@ -880,11 +977,9 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 			};
 		}
 
-		void callback(Reference<ITransaction> tr) {
-			tr->atomicOp(key, value, (FDBMutationTypes::Option) op);
-		}
+		void callback(Reference<ITransaction> tr) override { tr->atomicOp(key, value, (FDBMutationTypes::Option)op); }
 
-		void augmentTrace(TraceEvent &e) const {
+		void augmentTrace(TraceEvent& e) const override {
 			base_type::augmentTrace(e);
 			e.detail("Key", printable(key)).detail("Value", printable(value)).detail("Op", op).detail("Pos", pos);
 		}
@@ -901,19 +996,28 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 				key = makeKey();
 			}
 			value = makeValue();
-			contract = {
-				std::make_pair( error_code_key_too_large, ExceptionContract::requiredIf(key.size() > (key.startsWith(systemKeys.begin) ? CLIENT_KNOBS->SYSTEM_KEY_SIZE_LIMIT : CLIENT_KNOBS->KEY_SIZE_LIMIT)) ),
-				std::make_pair( error_code_value_too_large, ExceptionContract::requiredIf(value.size() > CLIENT_KNOBS->VALUE_SIZE_LIMIT) ),
-				std::make_pair( error_code_key_outside_legal_range, ExceptionContract::requiredIf(
-							(key >= (workload->useSystemKeys ? systemKeys.end : normalKeys.end))) )
-			};
+			contract = { std::make_pair(
+				             error_code_key_too_large,
+				             ExceptionContract::requiredIf(key.size() > (key.startsWith(systemKeys.begin)
+				                                                             ? CLIENT_KNOBS->SYSTEM_KEY_SIZE_LIMIT
+				                                                             : CLIENT_KNOBS->KEY_SIZE_LIMIT))),
+				         std::make_pair(error_code_value_too_large,
+				                        ExceptionContract::requiredIf(value.size() > CLIENT_KNOBS->VALUE_SIZE_LIMIT)),
+				         std::make_pair(error_code_key_outside_legal_range,
+				                        ExceptionContract::requiredIf(
+				                            (key >= (workload->useSystemKeys ? systemKeys.end : normalKeys.end)) &&
+				                            !specialKeys.contains(key))),
+				         std::make_pair(error_code_special_keys_write_disabled,
+				                        ExceptionContract::requiredIf(specialKeys.contains(key) &&
+				                                                      !workload->specialKeysWritesEnabled)),
+				         std::make_pair(error_code_special_keys_no_write_module_found,
+				                        ExceptionContract::possibleIf(specialKeys.contains(key) &&
+				                                                      workload->specialKeysWritesEnabled)) };
 		}
 
-		void callback(Reference<ITransaction> tr) {
-			tr->set(key, value);
-		}
+		void callback(Reference<ITransaction> tr) override { tr->set(key, value); }
 
-		void augmentTrace(TraceEvent &e) const {
+		void augmentTrace(TraceEvent& e) const override {
 			base_type::augmentTrace(e);
 			e.detail("Key", printable(key)).detail("Value", printable(value));
 		}
@@ -930,19 +1034,28 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 				key1 = makeKey();
 				key2 = makeKey();
 			}
+
+			bool isSpecialKeyRange = specialKeys.contains(key1) && key2 <= specialKeys.end;
+
 			contract = {
-				std::make_pair( error_code_inverted_range, ExceptionContract::requiredIf(key1 > key2) ),
-				std::make_pair( error_code_key_outside_legal_range, ExceptionContract::requiredIf(
-							(key1 > (workload->useSystemKeys ? systemKeys.end : normalKeys.end)) ||
-							(key2 > (workload->useSystemKeys ? systemKeys.end : normalKeys.end))) )
+				std::make_pair(error_code_inverted_range, ExceptionContract::requiredIf(key1 > key2)),
+				std::make_pair(error_code_key_outside_legal_range,
+				               ExceptionContract::requiredIf(
+				                   ((key1 > (workload->useSystemKeys ? systemKeys.end : normalKeys.end)) ||
+				                    (key2 > (workload->useSystemKeys ? systemKeys.end : normalKeys.end))) &&
+				                   !isSpecialKeyRange)),
+				std::make_pair(error_code_special_keys_write_disabled,
+				               ExceptionContract::requiredIf(isSpecialKeyRange && !workload->specialKeysWritesEnabled)),
+				std::make_pair(error_code_special_keys_cross_module_clear,
+				               ExceptionContract::possibleIf(isSpecialKeyRange && workload->specialKeysWritesEnabled)),
+				std::make_pair(error_code_special_keys_no_write_module_found,
+				               ExceptionContract::possibleIf(isSpecialKeyRange && workload->specialKeysWritesEnabled))
 			};
 		}
 
-		void callback(Reference<ITransaction> tr) {
-			tr->clear(key1, key2);
-		}
+		void callback(Reference<ITransaction> tr) override { tr->clear(key1, key2); }
 
-		void augmentTrace(TraceEvent &e) const {
+		void augmentTrace(TraceEvent& e) const override {
 			base_type::augmentTrace(e);
 			e.detail("Key1", printable(key1)).detail("Key2", printable(key2));
 		}
@@ -959,19 +1072,28 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 				key1 = makeKey();
 				key2 = makeKey();
 			}
+
+			bool isSpecialKeyRange = specialKeys.contains(key1) && key2 <= specialKeys.end;
+
 			contract = {
-				std::make_pair( error_code_inverted_range, ExceptionContract::requiredIf(key1 > key2) ),
-				std::make_pair( error_code_key_outside_legal_range, ExceptionContract::requiredIf(
-							(key1 > (workload->useSystemKeys ? systemKeys.end : normalKeys.end)) ||
-							(key2 > (workload->useSystemKeys ? systemKeys.end : normalKeys.end))) )
+				std::make_pair(error_code_inverted_range, ExceptionContract::requiredIf(key1 > key2)),
+				std::make_pair(error_code_key_outside_legal_range,
+				               ExceptionContract::requiredIf(
+				                   ((key1 > (workload->useSystemKeys ? systemKeys.end : normalKeys.end)) ||
+				                    (key2 > (workload->useSystemKeys ? systemKeys.end : normalKeys.end))) &&
+				                   !isSpecialKeyRange)),
+				std::make_pair(error_code_special_keys_write_disabled,
+				               ExceptionContract::requiredIf(isSpecialKeyRange && !workload->specialKeysWritesEnabled)),
+				std::make_pair(error_code_special_keys_cross_module_clear,
+				               ExceptionContract::possibleIf(isSpecialKeyRange && workload->specialKeysWritesEnabled)),
+				std::make_pair(error_code_special_keys_no_write_module_found,
+				               ExceptionContract::possibleIf(isSpecialKeyRange && workload->specialKeysWritesEnabled))
 			};
 		}
 
-		void callback(Reference<ITransaction> tr) {
-			tr->clear(KeyRangeRef(key1, key2));
-		}
+		void callback(Reference<ITransaction> tr) override { tr->clear(KeyRangeRef(key1, key2)); }
 
-		void augmentTrace(TraceEvent &e) const {
+		void augmentTrace(TraceEvent& e) const override {
 			base_type::augmentTrace(e);
 			e.detail("Key1", printable(key1)).detail("Key2", printable(key2));
 		}
@@ -986,17 +1108,20 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 			while (isProtectedKey(key)) {
 				key = makeKey();
 			}
-			contract = {
-				std::make_pair( error_code_key_outside_legal_range, ExceptionContract::requiredIf(
-							key >= (workload->useSystemKeys ? systemKeys.end : normalKeys.end) ) )
-			};
+			contract = { std::make_pair(error_code_key_outside_legal_range,
+				                        ExceptionContract::requiredIf(
+				                            key >= (workload->useSystemKeys ? systemKeys.end : normalKeys.end))),
+				         std::make_pair(error_code_special_keys_write_disabled,
+				                        ExceptionContract::requiredIf(specialKeys.contains(key) &&
+				                                                      !workload->specialKeysWritesEnabled)),
+				         std::make_pair(error_code_special_keys_no_write_module_found,
+				                        ExceptionContract::possibleIf(specialKeys.contains(key) &&
+				                                                      workload->specialKeysWritesEnabled)) };
 		}
 
-		void callback(Reference<ITransaction> tr) {
-			tr->clear(key);
-		}
+		void callback(Reference<ITransaction> tr) override { tr->clear(key); }
 
-		void augmentTrace(TraceEvent &e) const {
+		void augmentTrace(TraceEvent& e) const override {
 			base_type::augmentTrace(e);
 			e.detail("Key", printable(key));
 		}
@@ -1018,11 +1143,9 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 			};
 		}
 
-		ThreadFuture<value_type> createFuture(Reference<ITransaction> tr) {
-			return tr->watch(key);
-		}
+		ThreadFuture<value_type> createFuture(Reference<ITransaction> tr) override { return tr->watch(key); }
 
-		void augmentTrace(TraceEvent &e) const {
+		void augmentTrace(TraceEvent& e) const override {
 			base_type::augmentTrace(e);
 			e.detail("Key", printable(key));
 		}
@@ -1043,11 +1166,9 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 			};
 		}
 
-		void callback(Reference<ITransaction> tr) {
-			tr->addWriteConflictRange(KeyRangeRef(key1, key2));
-		}
+		void callback(Reference<ITransaction> tr) override { tr->addWriteConflictRange(KeyRangeRef(key1, key2)); }
 
-		void augmentTrace(TraceEvent &e) const {
+		void augmentTrace(TraceEvent& e) const override {
 			base_type::augmentTrace(e);
 			e.detail("Key1", printable(key1)).detail("Key2", printable(key2));
 		}
@@ -1082,7 +1203,20 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 				}
 				op = deterministicRandom()->randomInt(minval, maxval+1);
 			}
-			if(op == FDBTransactionOptions::ACCESS_SYSTEM_KEYS || op == FDBTransactionOptions::READ_SYSTEM_KEYS) //do not test access system keys since the option is actually used by the workload
+
+			//do not test the following options since they are actually used by the workload
+			if(op == FDBTransactionOptions::ACCESS_SYSTEM_KEYS ||
+			   op == FDBTransactionOptions::READ_SYSTEM_KEYS ||
+			   op == FDBTransactionOptions::SPECIAL_KEY_SPACE_ENABLE_WRITES)
+			{
+				op = -1;
+			}
+			
+			// do not test the option since it's already used by the workload
+			if (op == FDBTransactionOptions::SPECIAL_KEY_SPACE_RELAXED)
+				op = -1;
+			// disable for now(see issue#3934, pr#3930)
+			if (op == FDBTransactionOptions::CHECK_WRITES_ENABLE)
 				op = -1;
 
 			double orv = deterministicRandom()->random01();
@@ -1100,17 +1234,19 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 			contract = {
 				std::make_pair( error_code_invalid_option, ExceptionContract::Possible ),
 				std::make_pair( error_code_invalid_option_value, ExceptionContract::Possible ),
+				std::make_pair( error_code_tag_too_long, ExceptionContract::Possible ),
+				std::make_pair( error_code_too_many_tags, ExceptionContract::Possible ),
 				std::make_pair( error_code_client_invalid_operation, ExceptionContract::possibleIf((FDBTransactionOptions::Option)op == FDBTransactionOptions::READ_YOUR_WRITES_DISABLE || 
 				                                                                                   (FDBTransactionOptions::Option)op == FDBTransactionOptions::LOG_TRANSACTION) ),
 				std::make_pair( error_code_read_version_already_set, ExceptionContract::possibleIf((FDBTransactionOptions::Option)op == FDBTransactionOptions::INITIALIZE_NEW_DATABASE) )
 			};
 		}
 
-		void callback(Reference<ITransaction> tr) {
+		void callback(Reference<ITransaction> tr) override {
 			tr->setOption((FDBTransactionOptions::Option) op, val.castTo<StringRef>());
 		}
 
-		void augmentTrace(TraceEvent &e) const {
+		void augmentTrace(TraceEvent& e) const override {
 			base_type::augmentTrace(e);
 			e.detail("Op", op).detail("Val", printable(val));
 		}
@@ -1131,7 +1267,7 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 			}
 		}
 
-		void callback(Reference<ITransaction> tr) {
+		void callback(Reference<ITransaction> tr) override {
 			tr->onError(Error::fromUnvalidatedCode(errorcode));
 			// This is necessary here, as onError will have reset this
 			// value, we will be looking at the wrong thing.
@@ -1139,7 +1275,7 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 				tr->setOption( FDBTransactionOptions::ACCESS_SYSTEM_KEYS );
 		}
 
-		void augmentTrace(TraceEvent &e) const {
+		void augmentTrace(TraceEvent& e) const override {
 			base_type::augmentTrace(e);
 			e.detail("ErrorCode", errorcode);
 		}

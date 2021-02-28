@@ -55,7 +55,6 @@ private:
 #ifdef __linux__
 	class EventFD : public IEventFD {
 		int fd;
-		ASIOReactor* reactor;
 		boost::asio::posix::stream_descriptor sd;
 		int64_t fdVal;
 
@@ -66,12 +65,12 @@ private:
 		}
 
 	public:
-		EventFD(ASIOReactor* reactor) : reactor(reactor), sd(reactor->ios, open()) {}
-		~EventFD() {
+		EventFD(ASIOReactor* reactor) : sd(reactor->ios, open()) {}
+		~EventFD() override {
 			sd.close();  // Also closes the fd, I assume...
 		}
-		virtual int getFD() { return fd; }
-		virtual Future<int64_t> read() {
+		int getFD() override { return fd; }
+		Future<int64_t> read() override {
 			Promise<int64_t> p;
 			sd.async_read_some( boost::asio::mutable_buffers_1( &fdVal, sizeof(fdVal) ), 
 				boost::bind( &EventFD::handle_read, p, &fdVal, boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred ) );

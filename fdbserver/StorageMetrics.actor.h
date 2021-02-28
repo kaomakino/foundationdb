@@ -27,6 +27,11 @@
 #include "fdbserver/Knobs.h"
 #include "flow/actorcompiler.h"  // This must be the last #include.
 
+const StringRef STORAGESERVER_HISTOGRAM_GROUP = LiteralStringRef("StorageServer");
+const StringRef FETCH_KEYS_LATENCY_HISTOGRAM = LiteralStringRef("FetchKeysLatency");
+const StringRef FETCH_KEYS_BYTES_HISTOGRAM = LiteralStringRef("FetchKeysSize");
+const StringRef FETCH_KEYS_BYTES_PER_SECOND_HISTOGRAM = LiteralStringRef("FetchKeysBandwidth");
+
 struct StorageMetricSample {
 	IndexedSet<Key, int64_t> sample;
 	int64_t metricUnitsPerSample;
@@ -100,9 +105,6 @@ struct TransientStorageMetricSample : StorageMetricSample {
 
 	TransientStorageMetricSample( int64_t metricUnitsPerSample ) : StorageMetricSample(metricUnitsPerSample) {}
 
-	bool roll( KeyRef key, int64_t metric ) {
-		return deterministicRandom()->random01() < (double)metric / metricUnitsPerSample;	//< SOMEDAY: Better randomInt64?
-	}
 
 	// Returns the sampled metric value (possibly 0, possibly increased by the sampling factor)
 	int64_t addAndExpire( KeyRef key, int64_t metric, double expiration ) {
@@ -164,6 +166,11 @@ struct TransientStorageMetricSample : StorageMetricSample {
 	}
 
 private:
+	bool roll(KeyRef key, int64_t metric) const {
+		return deterministicRandom()->random01() <
+		       (double)metric / metricUnitsPerSample; //< SOMEDAY: Better randomInt64?
+	}
+
 	int64_t add( KeyRef key, int64_t metric ) {
 		if (!metric) return 0;
 		int64_t mag = metric<0 ? -metric : metric;
@@ -195,7 +202,7 @@ struct StorageServerMetrics {
 	    bytesReadSample(SERVER_KNOBS->BYTES_READ_UNITS_PER_SAMPLE) {}
 
 	// Get the current estimated metrics for the given keys
-	StorageMetrics getMetrics( KeyRangeRef const& keys ) {
+	StorageMetrics getMetrics(KeyRangeRef const& keys) const {
 		StorageMetrics result;
 		result.bytes = byteSample.getEstimate( keys );
 		result.bytesPerKSecond = bandwidthSample.getEstimate( keys ) * SERVER_KNOBS->STORAGE_METRICS_AVERAGE_INTERVAL_PER_KSECONDS;
@@ -210,9 +217,9 @@ struct StorageServerMetrics {
 	void notify( KeyRef key, StorageMetrics& metrics ) {
 		ASSERT (metrics.bytes == 0); // ShardNotifyMetrics
 		if (g_network->isSimulated()) {
-			TEST(metrics.bytesPerKSecond != 0); // ShardNotifyMetrics
-			TEST(metrics.iosPerKSecond != 0); // ShardNotifyMetrics
-			TEST(metrics.bytesReadPerKSecond != 0); // ShardNotifyMetrics
+			TEST(metrics.bytesPerKSecond != 0); // ShardNotifyMetrics bytes
+			TEST(metrics.iosPerKSecond != 0); // ShardNotifyMetrics ios
+			TEST(metrics.bytesReadPerKSecond != 0); // ShardNotifyMetrics bytesRead
 		}
 
 		double expire = now() + SERVER_KNOBS->STORAGE_METRICS_AVERAGE_INTERVAL;
@@ -230,7 +237,7 @@ struct StorageServerMetrics {
 			auto& v = waitMetricsMap[key];
 			for(int i=0; i<v.size(); i++) {
 				if (g_network->isSimulated()) {
-					TEST(true);
+					TEST(true); // shard notify metrics
 				}
 				// ShardNotifyMetrics
 				v[i].send( notifyMetrics );
@@ -257,7 +264,7 @@ struct StorageServerMetrics {
 
 	// Called by StorageServerDisk when the size of a key in byteSample changes, to notify WaitMetricsRequest
 	// Should not be called for keys past allKeys.end
-	void notifyBytes( RangeMap<Key, std::vector<PromiseStream<StorageMetrics>>, KeyRangeRef>::Iterator shard, int64_t bytes ) {
+	void notifyBytes( RangeMap<Key, std::vector<PromiseStream<StorageMetrics>>, KeyRangeRef>::iterator shard, int64_t bytes ) {
 		ASSERT(shard.end() <= allKeys.end);
 
 		StorageMetrics notifyMetrics;
@@ -305,9 +312,9 @@ struct StorageServerMetrics {
 	//static void waitMetrics( StorageServerMetrics* const& self, WaitMetricsRequest const& req );
 
 	// This function can run on untrusted user data.  We must validate all divisions carefully.
-	KeyRef getSplitKey( int64_t remaining, int64_t estimated, int64_t limits, int64_t used, int64_t infinity,
-		bool isLastShard, StorageMetricSample& sample, double divisor, KeyRef const& lastKey, KeyRef const& key, bool hasUsed ) 
-	{	
+	KeyRef getSplitKey(int64_t remaining, int64_t estimated, int64_t limits, int64_t used, int64_t infinity,
+	                   bool isLastShard, const StorageMetricSample& sample, double divisor, KeyRef const& lastKey,
+	                   KeyRef const& key, bool hasUsed) const {
 		ASSERT(remaining >= 0);
 		ASSERT(limits > 0);
 		ASSERT(divisor > 0);
@@ -335,7 +342,7 @@ struct StorageServerMetrics {
 		return key;
 	}
 
-	void splitMetrics( SplitMetricsRequest req ) {
+	void splitMetrics(SplitMetricsRequest req) const {
 		try {
 			SplitMetricsReply reply;
 			KeyRef lastKey = req.keys.begin;
@@ -378,7 +385,8 @@ struct StorageServerMetrics {
 		}
 	}
 
-	void getStorageMetrics( GetStorageMetricsRequest req, StorageBytes sb, double bytesInputRate ){
+	void getStorageMetrics(GetStorageMetricsRequest req, StorageBytes sb, double bytesInputRate, int64_t versionLag,
+	                       double lastUpdate) const {
 		GetStorageMetricsReply rep;
 
 		// SOMEDAY: make bytes dynamic with hard disk space
@@ -405,10 +413,109 @@ struct StorageServerMetrics {
 
 		rep.bytesInputRate = bytesInputRate;
 
+		rep.versionLag = versionLag;
+		rep.lastUpdate = lastUpdate;
+
 		req.reply.send(rep);
 	}
 
 	Future<Void> waitMetrics(WaitMetricsRequest req, Future<Void> delay);
+
+	// Given a read hot shard, this function will divide the shard into chunks and find those chunks whose
+	// readBytes/sizeBytes exceeds the `readDensityRatio`. Please make sure to run unit tests
+	// `StorageMetricsSampleTests.txt` after change made.
+	std::vector<ReadHotRangeWithMetrics> getReadHotRanges(KeyRangeRef shard, double readDensityRatio,
+	                                                      int64_t baseChunkSize,
+	                                                      int64_t minShardReadBandwidthPerKSeconds) const {
+		std::vector<ReadHotRangeWithMetrics> toReturn;
+
+		double shardSize = (double)byteSample.getEstimate(shard);
+		int64_t shardReadBandwidth = bytesReadSample.getEstimate(shard);
+		if (shardReadBandwidth * SERVER_KNOBS->STORAGE_METRICS_AVERAGE_INTERVAL_PER_KSECONDS <=
+		    minShardReadBandwidthPerKSeconds) {
+			return toReturn;
+		}
+		if (shardSize <= baseChunkSize) {
+			// Shard is small, use it as is
+			if (bytesReadSample.getEstimate(shard) > (readDensityRatio * shardSize)) {
+				toReturn.emplace_back(shard, bytesReadSample.getEstimate(shard) / shardSize,
+				                      bytesReadSample.getEstimate(shard) /
+				                          SERVER_KNOBS->STORAGE_METRICS_AVERAGE_INTERVAL);
+			}
+			return toReturn;
+		}
+		KeyRef beginKey = shard.begin;
+		auto endKey =
+		    byteSample.sample.index(byteSample.sample.sumTo(byteSample.sample.lower_bound(beginKey)) + baseChunkSize);
+		while (endKey != byteSample.sample.end()) {
+			if (*endKey > shard.end) {
+				endKey = byteSample.sample.lower_bound(shard.end);
+				if (*endKey == beginKey) {
+					// No need to increment endKey since otherwise it would stuck here forever.
+					break;
+				}
+			}
+			if (*endKey == beginKey) {
+				++endKey;
+				continue;
+			}
+			if (bytesReadSample.getEstimate(KeyRangeRef(beginKey, *endKey)) >
+			    (readDensityRatio * std::max(baseChunkSize, byteSample.getEstimate(KeyRangeRef(beginKey, *endKey))))) {
+				auto range = KeyRangeRef(beginKey, *endKey);
+				if (!toReturn.empty() && toReturn.back().keys.end == range.begin) {
+					// in case two consecutive chunks both are over the ratio, merge them.
+					range = KeyRangeRef(toReturn.back().keys.begin, *endKey);
+					toReturn.pop_back();
+				}
+				toReturn.emplace_back(
+				    range,
+				    (double)bytesReadSample.getEstimate(range) / std::max(baseChunkSize, byteSample.getEstimate(range)),
+				    bytesReadSample.getEstimate(range) / SERVER_KNOBS->STORAGE_METRICS_AVERAGE_INTERVAL);
+			}
+			beginKey = *endKey;
+			endKey = byteSample.sample.index(byteSample.sample.sumTo(byteSample.sample.lower_bound(beginKey)) +
+			                                 baseChunkSize);
+		}
+		return toReturn;
+	}
+
+	void getReadHotRanges(ReadHotSubRangeRequest req) const {
+		ReadHotSubRangeReply reply;
+		auto _ranges = getReadHotRanges(req.keys, SERVER_KNOBS->SHARD_MAX_READ_DENSITY_RATIO,
+		                                SERVER_KNOBS->READ_HOT_SUB_RANGE_CHUNK_SIZE,
+		                                SERVER_KNOBS->SHARD_READ_HOT_BANDWITH_MIN_PER_KSECONDS);
+		reply.readHotRanges = VectorRef(_ranges.data(), _ranges.size());
+		req.reply.send(reply);
+	}
+
+	std::vector<KeyRef> getSplitPoints(KeyRangeRef range, int64_t chunkSize) {
+		std::vector<KeyRef> toReturn;
+		KeyRef beginKey = range.begin;
+		IndexedSet<Key, int64_t>::iterator endKey =
+		    byteSample.sample.index(byteSample.sample.sumTo(byteSample.sample.lower_bound(beginKey)) + chunkSize);
+		while (endKey != byteSample.sample.end()) {
+			if (*endKey > range.end) {
+				break;
+			}
+			if (*endKey == beginKey) {
+				++endKey;
+				continue;
+			}
+			toReturn.push_back(*endKey);
+			beginKey = *endKey;
+			endKey =
+			    byteSample.sample.index(byteSample.sample.sumTo(byteSample.sample.lower_bound(beginKey)) + chunkSize);
+		}
+		return toReturn;
+	}
+
+	void getSplitPoints(SplitRangeRequest req) {
+		SplitRangeReply reply;
+		std::vector<KeyRef> points = getSplitPoints(req.keys, req.chunkSize);
+
+		reply.splitPoints.append_deep(reply.splitPoints.arena(), points.data(), points.size());
+		req.reply.send(reply);
+	}
 
 private:
 	static void collapse( KeyRangeMap<int>& map, KeyRef const& key ) {
@@ -429,6 +536,186 @@ private:
 		collapse( map, keys.end );
 	}
 };
+
+TEST_CASE("/fdbserver/StorageMetricSample/rangeSplitPoints/simple") {
+
+	int64_t sampleUnit = SERVER_KNOBS->BYTES_READ_UNITS_PER_SAMPLE;
+	StorageServerMetrics ssm;
+
+	ssm.byteSample.sample.insert(LiteralStringRef("A"), 200 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Absolute"), 800 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Apple"), 1000 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Bah"), 20 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Banana"), 80 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Bob"), 200 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("But"), 100 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Cat"), 300 * sampleUnit);
+
+	vector<KeyRef> t = ssm.getSplitPoints(KeyRangeRef(LiteralStringRef("A"), LiteralStringRef("C")), 2000 * sampleUnit);
+
+	ASSERT(t.size() == 1 && t[0] == LiteralStringRef("Bah"));
+
+	return Void();
+}
+
+TEST_CASE("/fdbserver/StorageMetricSample/rangeSplitPoints/multipleReturnedPoints") {
+
+	int64_t sampleUnit = SERVER_KNOBS->BYTES_READ_UNITS_PER_SAMPLE;
+	StorageServerMetrics ssm;
+
+	ssm.byteSample.sample.insert(LiteralStringRef("A"), 200 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Absolute"), 800 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Apple"), 1000 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Bah"), 20 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Banana"), 80 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Bob"), 200 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("But"), 100 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Cat"), 300 * sampleUnit);
+
+	vector<KeyRef> t = ssm.getSplitPoints(KeyRangeRef(LiteralStringRef("A"), LiteralStringRef("C")), 600 * sampleUnit);
+
+	ASSERT(t.size() == 3 && t[0] == LiteralStringRef("Absolute") && t[1] == LiteralStringRef("Apple") &&
+	       t[2] == LiteralStringRef("Bah"));
+
+	return Void();
+}
+
+TEST_CASE("/fdbserver/StorageMetricSample/rangeSplitPoints/noneSplitable") {
+
+	int64_t sampleUnit = SERVER_KNOBS->BYTES_READ_UNITS_PER_SAMPLE;
+	StorageServerMetrics ssm;
+
+	ssm.byteSample.sample.insert(LiteralStringRef("A"), 200 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Absolute"), 800 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Apple"), 1000 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Bah"), 20 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Banana"), 80 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Bob"), 200 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("But"), 100 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Cat"), 300 * sampleUnit);
+
+	vector<KeyRef> t = ssm.getSplitPoints(KeyRangeRef(LiteralStringRef("A"), LiteralStringRef("C")), 10000 * sampleUnit);
+
+	ASSERT(t.size() == 0);
+
+	return Void();
+}
+
+
+TEST_CASE("/fdbserver/StorageMetricSample/rangeSplitPoints/chunkTooLarge") {
+
+	int64_t sampleUnit = SERVER_KNOBS->BYTES_READ_UNITS_PER_SAMPLE;
+	StorageServerMetrics ssm;
+
+	ssm.byteSample.sample.insert(LiteralStringRef("A"), 20 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Absolute"), 80 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Apple"), 10 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Bah"), 20 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Banana"), 80 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Bob"), 20 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("But"), 10 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Cat"), 30 * sampleUnit);
+
+	vector<KeyRef> t = ssm.getSplitPoints(KeyRangeRef(LiteralStringRef("A"), LiteralStringRef("C")), 1000 * sampleUnit);
+
+	ASSERT(t.size() == 0);
+
+	return Void();
+}
+
+TEST_CASE("/fdbserver/StorageMetricSample/readHotDetect/simple") {
+
+	int64_t sampleUnit = SERVER_KNOBS->BYTES_READ_UNITS_PER_SAMPLE;
+	StorageServerMetrics ssm;
+
+	ssm.bytesReadSample.sample.insert(LiteralStringRef("Apple"), 1000 * sampleUnit);
+	ssm.bytesReadSample.sample.insert(LiteralStringRef("Banana"), 2000 * sampleUnit);
+	ssm.bytesReadSample.sample.insert(LiteralStringRef("Cat"), 1000 * sampleUnit);
+	ssm.bytesReadSample.sample.insert(LiteralStringRef("Cathode"), 1000 * sampleUnit);
+	ssm.bytesReadSample.sample.insert(LiteralStringRef("Dog"), 1000 * sampleUnit);
+
+	ssm.byteSample.sample.insert(LiteralStringRef("A"), 20 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Absolute"), 80 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Apple"), 1000 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Bah"), 20 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Banana"), 80 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Bob"), 200 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("But"), 100 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Cat"), 300 * sampleUnit);
+
+	std::vector<ReadHotRangeWithMetrics> t =
+	    ssm.getReadHotRanges(KeyRangeRef(LiteralStringRef("A"), LiteralStringRef("C")), 2.0, 200 * sampleUnit, 0);
+
+	ASSERT(t.size() == 1 && (*t.begin()).keys.begin == LiteralStringRef("Bah") &&
+	       (*t.begin()).keys.end == LiteralStringRef("Bob"));
+
+	return Void();
+}
+
+TEST_CASE("/fdbserver/StorageMetricSample/readHotDetect/moreThanOneRange") {
+
+	int64_t sampleUnit = SERVER_KNOBS->BYTES_READ_UNITS_PER_SAMPLE;
+	StorageServerMetrics ssm;
+
+	ssm.bytesReadSample.sample.insert(LiteralStringRef("Apple"), 1000 * sampleUnit);
+	ssm.bytesReadSample.sample.insert(LiteralStringRef("Banana"), 2000 * sampleUnit);
+	ssm.bytesReadSample.sample.insert(LiteralStringRef("Cat"), 1000 * sampleUnit);
+	ssm.bytesReadSample.sample.insert(LiteralStringRef("Cathode"), 1000 * sampleUnit);
+	ssm.bytesReadSample.sample.insert(LiteralStringRef("Dog"), 1000 * sampleUnit);
+	ssm.bytesReadSample.sample.insert(LiteralStringRef("Final"), 2000 * sampleUnit);
+
+	ssm.byteSample.sample.insert(LiteralStringRef("A"), 20 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Absolute"), 80 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Apple"), 1000 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Bah"), 20 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Banana"), 80 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Bob"), 200 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("But"), 100 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Cat"), 300 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Dah"), 300 * sampleUnit);
+
+	std::vector<ReadHotRangeWithMetrics> t =
+	    ssm.getReadHotRanges(KeyRangeRef(LiteralStringRef("A"), LiteralStringRef("D")), 2.0, 200 * sampleUnit, 0);
+
+	ASSERT(t.size() == 2 && (*t.begin()).keys.begin == LiteralStringRef("Bah") &&
+	       (*t.begin()).keys.end == LiteralStringRef("Bob"));
+	ASSERT(t.at(1).keys.begin == LiteralStringRef("Cat") && t.at(1).keys.end == LiteralStringRef("Dah"));
+
+	return Void();
+}
+
+TEST_CASE("/fdbserver/StorageMetricSample/readHotDetect/consecutiveRanges") {
+
+	int64_t sampleUnit = SERVER_KNOBS->BYTES_READ_UNITS_PER_SAMPLE;
+	StorageServerMetrics ssm;
+
+	ssm.bytesReadSample.sample.insert(LiteralStringRef("Apple"), 1000 * sampleUnit);
+	ssm.bytesReadSample.sample.insert(LiteralStringRef("Banana"), 2000 * sampleUnit);
+	ssm.bytesReadSample.sample.insert(LiteralStringRef("Bucket"), 2000 * sampleUnit);
+	ssm.bytesReadSample.sample.insert(LiteralStringRef("Cat"), 1000 * sampleUnit);
+	ssm.bytesReadSample.sample.insert(LiteralStringRef("Cathode"), 1000 * sampleUnit);
+	ssm.bytesReadSample.sample.insert(LiteralStringRef("Dog"), 5000 * sampleUnit);
+	ssm.bytesReadSample.sample.insert(LiteralStringRef("Final"), 2000 * sampleUnit);
+
+	ssm.byteSample.sample.insert(LiteralStringRef("A"), 20 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Absolute"), 80 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Apple"), 1000 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Bah"), 20 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Banana"), 80 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Bob"), 200 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("But"), 100 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Cat"), 300 * sampleUnit);
+	ssm.byteSample.sample.insert(LiteralStringRef("Dah"), 300 * sampleUnit);
+
+	std::vector<ReadHotRangeWithMetrics> t =
+	    ssm.getReadHotRanges(KeyRangeRef(LiteralStringRef("A"), LiteralStringRef("D")), 2.0, 200 * sampleUnit, 0);
+
+	ASSERT(t.size() == 2 && (*t.begin()).keys.begin == LiteralStringRef("Bah") &&
+	       (*t.begin()).keys.end == LiteralStringRef("But"));
+	ASSERT(t.at(1).keys.begin == LiteralStringRef("Cat") && t.at(1).keys.end == LiteralStringRef("Dah"));
+
+	return Void();
+}
 
 //Contains information about whether or not a key-value pair should be included in a byte sample
 //Also contains size information about the byte sample

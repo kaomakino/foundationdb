@@ -22,7 +22,6 @@
 #include "fdbserver/TesterInterface.actor.h"
 #include "fdbserver/workloads/workloads.actor.h"
 #include "fdbserver/QuietDatabase.h"
-#include "fdbserver/ClusterRecruitmentInterface.h"
 #include "flow/actorcompiler.h"  // This must be the last #include.
 
 struct PerformanceWorkload : TestWorkload {
@@ -49,24 +48,22 @@ struct PerformanceWorkload : TestWorkload {
 		printf( "saved %d options\n", savedOptions.size() );
 	}
 
-	virtual std::string description() { return "PerformanceTestWorkload"; }
-	virtual Future<Void> setup( Database const& cx ) {
+	std::string description() const override { return "PerformanceTestWorkload"; }
+	Future<Void> setup(Database const& cx) override {
 		if( !clientId )
 			return _setup( cx, this );
 		return Void();
 	}
 
-	virtual Future<Void> start( Database const& cx ) { 
+	Future<Void> start(Database const& cx) override {
 		if( !clientId )
 			return _start( cx, this );
 		return Void();
 	}
 
-	virtual Future<bool> check( Database const& cx ) { 
-		return true;
-	}
+	Future<bool> check(Database const& cx) override { return true; }
 
-	virtual void getMetrics( vector<PerfMetric>& m ) {
+	void getMetrics(vector<PerfMetric>& m) override {
 		for(int i=0; i < metrics.size(); i++)
 			m.push_back( metrics[i] );
 		if( !clientId ) {

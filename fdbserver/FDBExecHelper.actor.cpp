@@ -7,9 +7,7 @@
 #include "fdbserver/FDBExecHelper.actor.h"
 #include "flow/Trace.h"
 #include "flow/flow.h"
-#if defined(CMAKE_BUILD) || !defined(_WIN32)
-#include "versions.h"
-#endif
+#include "fdbclient/versions.h"
 #include "fdbserver/Knobs.h"
 #include "flow/actorcompiler.h"  // This must be the last #include.
 
@@ -29,15 +27,15 @@ void ExecCmdValueString::setCmdValueString(StringRef pCmdValueString) {
 	parseCmdValue();
 }
 
-StringRef ExecCmdValueString::getCmdValueString() {
+StringRef ExecCmdValueString::getCmdValueString() const {
 	return cmdValueString.toString();
 }
 
-StringRef ExecCmdValueString::getBinaryPath() {
+StringRef ExecCmdValueString::getBinaryPath() const {
 	return binaryPath;
 }
 
-VectorRef<StringRef> ExecCmdValueString::getBinaryArgs() {
+VectorRef<StringRef> ExecCmdValueString::getBinaryArgs() const {
 	return binaryArgs;
 }
 
@@ -59,7 +57,7 @@ void ExecCmdValueString::parseCmdValue() {
 	return;
 }
 
-void ExecCmdValueString::dbgPrint() {
+void ExecCmdValueString::dbgPrint() const {
 	auto te = TraceEvent("ExecCmdValueString");
 
 	te.detail("CmdValueString", cmdValueString.toString());
@@ -79,65 +77,134 @@ ACTOR Future<int> spawnProcess(std::string binPath, std::vector<std::string> par
 	return 0;
 }
 #else
-ACTOR Future<int> spawnProcess(std::string binPath, std::vector<std::string> paramList, double maxWaitTime, bool isSync, double maxSimDelayTime)
-{
-	state std::string argsString;
-	for (auto const& elem : paramList) {
-		argsString += elem + ",";
+
+static auto fork_child(const std::string& path, std::vector<char*>& paramList) {
+	int pipefd[2];
+	pipe(pipefd);
+	auto readFD = pipefd[0];
+	auto writeFD = pipefd[1];
+	pid_t pid = fork();
+	if (pid == -1) {
+		close(readFD);
+		close(writeFD);
+		return std::make_pair(-1, Optional<int>{});
 	}
-	TraceEvent("SpawnProcess").detail("Cmd", binPath).detail("Args", argsString);
+	if (pid == 0) {
+		close(readFD);
+		dup2(writeFD, 1); // stdout
+		dup2(writeFD, 2); // stderr
+		close(writeFD);
+		execv(&path[0], &paramList[0]);
+		_exit(EXIT_FAILURE);
+	}
+	close(writeFD);
+	return std::make_pair(pid, Optional<int>{ readFD });
+}
 
-	state int err = 0;
-	state double runTime = 0;
-	state boost::process::child c(binPath, boost::process::args(paramList),
-								  boost::process::std_err > boost::process::null);
+static void setupTraceWithOutput(TraceEvent& event, size_t bytesRead, char* outputBuffer) {
+	if (bytesRead == 0) return;
+	ASSERT(bytesRead <= SERVER_KNOBS->MAX_FORKED_PROCESS_OUTPUT);
+	auto extraBytesNeeded = std::max<int>(bytesRead - event.getMaxFieldLength(), 0);
+	event.setMaxFieldLength(event.getMaxFieldLength() + extraBytesNeeded);
+	event.setMaxEventLength(event.getMaxEventLength() + extraBytesNeeded);
+	outputBuffer[bytesRead - 1] = '\0';
+	event.detail("Output", std::string(outputBuffer));
+}
 
-	// for async calls in simulator, always delay by a deterinistic amount of time and do the call
-	// synchronously, otherwise the predictability of the simulator breaks
+ACTOR Future<int> spawnProcess(std::string path, std::vector<std::string> args, double maxWaitTime, bool isSync, double maxSimDelayTime)
+{
+	// for async calls in simulator, always delay by a deterministic amount of time and then
+	// do the call synchronously, otherwise the predictability of the simulator breaks
 	if (!isSync && g_network->isSimulated()) {
 		double snapDelay = std::max(maxSimDelayTime - 1, 0.0);
 		// add some randomness
 		snapDelay += deterministicRandom()->random01();
 		TraceEvent("SnapDelaySpawnProcess")
-			.detail("SnapDelay", snapDelay);
+				.detail("SnapDelay", snapDelay);
 		wait(delay(snapDelay));
 	}
 
-	if (!isSync && !g_network->isSimulated()) {
-		while (c.running() && runTime <= maxWaitTime) {
-			wait(delay(0.1));
-			runTime += 0.1;
-		}
-	} else {
-		if (g_network->isSimulated()) {
-			// to keep the simulator deterministic, wait till the process exits,
-			// hence giving a large wait time
-			c.wait_for(std::chrono::hours(24));
-			ASSERT(!c.running());
-		} else {
-			int maxWaitTimeInt = static_cast<int>(maxWaitTime + 1.0);
-			c.wait_for(std::chrono::seconds(maxWaitTimeInt));
-		}
+	std::vector<char*> paramList;
+	for (int i = 0; i < args.size(); i++) {
+		paramList.push_back(&args[i][0]);
+	}
+	paramList.push_back(nullptr);
+
+	state std::string allArgs;
+	for (int i = 0; i < args.size(); i++) {
+		if (i > 0) allArgs += " ";
+		allArgs += args[i];
 	}
 
-	if (c.running()) {
-		TraceEvent(SevWarnAlways, "ChildTermination")
-				.detail("Cmd", binPath)
-				.detail("Args", argsString);
-		c.terminate();
-		err = -1;
-		if (!c.wait_for(std::chrono::seconds(1))) {
-			TraceEvent(SevWarnAlways, "SpawnProcessFailedToExit")
-				.detail("Cmd", binPath)
-				.detail("Args", argsString);
+	state std::pair<pid_t, Optional<int>> pidAndReadFD = fork_child(path, paramList);
+	state pid_t pid = pidAndReadFD.first;
+	state Optional<int> readFD = pidAndReadFD.second;
+	if (pid == -1) {
+		TraceEvent(SevWarnAlways, "SpawnProcess: Command failed to spawn")
+			.detail("Cmd", path)
+			.detail("Args", allArgs);
+		return -1;
+	} else if (pid > 0) {
+		state int status = -1;
+		state double runTime = 0;
+		state Arena arena;
+		state char* outputBuffer = new (arena) char[SERVER_KNOBS->MAX_FORKED_PROCESS_OUTPUT];
+		state size_t bytesRead = 0;
+		while (true) {
+			if (runTime > maxWaitTime) {
+				// timing out
+
+				TraceEvent(SevWarnAlways, "SpawnProcess : Command failed, timeout")
+					.detail("Cmd", path)
+					.detail("Args", allArgs);
+				return -1;
+			}
+			int err = waitpid(pid, &status, WNOHANG);
+			loop {
+				int bytes =
+				    read(readFD.get(), &outputBuffer[bytesRead], SERVER_KNOBS->MAX_FORKED_PROCESS_OUTPUT - bytesRead);
+				bytesRead += bytes;
+				if (bytes == 0) break;
+			}
+
+			if (err < 0) {
+				TraceEvent event(SevWarnAlways, "SpawnProcess : Command failed");
+				setupTraceWithOutput(event, bytesRead, outputBuffer);
+				event.detail("Cmd", path)
+				    .detail("Args", allArgs)
+				    .detail("Errno", WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+				return -1;
+			} else if (err == 0) {
+				// child process has not completed yet
+				if (isSync || g_network->isSimulated()) {
+					// synchronously sleep
+					threadSleep(0.1);
+				} else {
+					// yield for other actors to run
+					wait(delay(0.1));
+				}
+				runTime += 0.1;
+			} else {
+				// child process completed
+				if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0)) {
+					TraceEvent event(SevWarnAlways, "SpawnProcess : Command failed");
+					setupTraceWithOutput(event, bytesRead, outputBuffer);
+					event.detail("Cmd", path)
+					    .detail("Args", allArgs)
+					    .detail("Errno", WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+					return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+				}
+				TraceEvent event("SpawnProcess : Command status");
+				setupTraceWithOutput(event, bytesRead, outputBuffer);
+				event.detail("Cmd", path)
+				    .detail("Args", allArgs)
+				    .detail("Errno", WIFEXITED(status) ? WEXITSTATUS(status) : 0);
+				return 0;
+			}
 		}
-	} else {
-		err = c.exit_code();
 	}
-	TraceEvent("SpawnProcess")
-		.detail("Cmd", binPath)
-		.detail("Error", err);
-	return err;
+	return -1;
+
 }
 #endif
 
@@ -150,6 +217,7 @@ ACTOR Future<int> execHelper(ExecCmdValueString* execArg, UID snapUID, std::stri
 		// get bin path
 		auto snapBin = execArg->getBinaryPath();
 		std::vector<std::string> paramList;
+		paramList.push_back(snapBin.toString());
 		// get user passed arguments
 		auto listArgs = execArg->getBinaryArgs();
 		for (auto elem : listArgs) {
@@ -176,6 +244,7 @@ ACTOR Future<int> execHelper(ExecCmdValueString* execArg, UID snapUID, std::stri
 		folderTo = folder + "-snap-" + uidStr.toString() + "-" + role;
 		std::vector<std::string> paramList;
 		std::string mkdirBin = "/bin/mkdir";
+		paramList.push_back(mkdirBin);
 		paramList.push_back(folderTo);
 		cmdErr = spawnProcess(mkdirBin, paramList, maxWaitTime, false /*isSync*/, maxSimDelayTime);
 		wait(success(cmdErr));
@@ -183,6 +252,7 @@ ACTOR Future<int> execHelper(ExecCmdValueString* execArg, UID snapUID, std::stri
 		if (err == 0) {
 			std::vector<std::string> paramList;
 			std::string cpBin = "/bin/cp";
+			paramList.push_back(cpBin);
 			paramList.push_back("-a");
 			paramList.push_back(folderFrom);
 			paramList.push_back(folderTo);

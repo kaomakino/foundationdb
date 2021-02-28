@@ -25,10 +25,15 @@
 #include "fdbclient/FDBTypes.h"
 #include "fdbrpc/fdbrpc.h"
 #include "fdbrpc/Locality.h"
-#include "fdbclient/MasterProxyInterface.h"
+#include "fdbclient/CommitProxyInterface.h"
 #include "fdbclient/ClusterInterface.h"
 
 const int MAX_CLUSTER_FILE_BYTES = 60000;
+
+constexpr UID WLTOKEN_CLIENTLEADERREG_GETLEADER(-1, 2);
+constexpr UID WLTOKEN_CLIENTLEADERREG_OPENDATABASE(-1, 3);
+
+constexpr UID WLTOKEN_PROTOCOL_INFO(-1, 10);
 
 struct ClientLeaderRegInterface {
 	RequestStream< struct GetLeaderRequest > getLeader;
@@ -103,8 +108,12 @@ struct LeaderInfo {
 	LeaderInfo() : forward(false) {}
 	LeaderInfo(UID changeID) : changeID(changeID), forward(false) {}
 
-	bool operator < (LeaderInfo const& r) const { return changeID < r.changeID; }
-	bool operator == (LeaderInfo const& r) const { return changeID == r.changeID; }
+	bool operator<(LeaderInfo const& r) const { return changeID < r.changeID; }
+	bool operator>(LeaderInfo const& r) const { return r < *this; }
+	bool operator<=(LeaderInfo const& r) const { return !(*this > r); }
+	bool operator>=(LeaderInfo const& r) const { return !(*this < r); }
+	bool operator==(LeaderInfo const& r) const { return changeID == r.changeID; }
+	bool operator!=(LeaderInfo const& r) const { return !(*this == r); }
 
 	// The first 7 bits of ChangeID represent cluster controller process class fitness, the lower the better
 	void updateChangeID(ClusterControllerPriorityInfo info) {
@@ -121,6 +130,14 @@ struct LeaderInfo {
 	// 2. the leader process class fitness becomes worse
 	bool leaderChangeRequired(LeaderInfo const& candidate) const {
 		return ((changeID.first() & ~mask) > (candidate.changeID.first() & ~mask) && !equalInternalId(candidate)) || ((changeID.first() & ~mask) < (candidate.changeID.first() & ~mask) && equalInternalId(candidate));
+	}
+
+	ClusterControllerPriorityInfo getPriorityInfo() const {
+		ClusterControllerPriorityInfo info;
+		info.processClassFitness = (changeID.first() >> 57) & 7;
+		info.isExcluded = (changeID.first() >> 60) & 1;
+		info.dcFitness = (changeID.first() >> 61) & 7;
+		return info;
 	}
 
 	template <class Ar>
@@ -170,7 +187,34 @@ public:
 	Reference<ClusterConnectionFile> ccf; 
 
 	explicit ClientCoordinators( Reference<ClusterConnectionFile> ccf );
+	explicit ClientCoordinators( Key clusterKey, std::vector<NetworkAddress> coordinators );
 	ClientCoordinators() {}
+};
+
+struct ProtocolInfoReply {
+	constexpr static FileIdentifier file_identifier = 7784298;
+	ProtocolVersion version;
+	template <class Ar>
+	void serialize(Ar& ar) {
+		uint64_t version_ = 0;
+		if (Ar::isSerializing) {
+			version_ = version.versionWithFlags();
+		}
+		serializer(ar, version_);
+		if (Ar::isDeserializing) {
+			version = ProtocolVersion(version_);
+		}
+	}
+};
+
+struct ProtocolInfoRequest {
+	constexpr static FileIdentifier file_identifier = 13261233;
+	ReplyPromise<ProtocolInfoReply> reply{ PeerCompatibilityPolicy{ RequirePeer::AtLeast,
+		                                                            ProtocolVersion::withStableInterfaces() } };
+	template <class Ar>
+	void serialize(Ar& ar) {
+		serializer(ar, reply);
+	}
 };
 
 #endif

@@ -21,6 +21,7 @@
 #include <math.h>
 
 #include "flow/IRandom.h"
+#include "flow/Tracing.h"
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbserver/TesterInterface.actor.h"
 #include "fdbserver/workloads/workloads.actor.h"
@@ -33,6 +34,10 @@
 #include "flow/DeterministicRandom.h"
 #include "fdbclient/ManagementAPI.actor.h"
 #include "flow/actorcompiler.h"  // This must be the last #include.
+#include "flow/network.h"
+
+//#define SevCCheckInfo SevVerbose
+#define SevCCheckInfo SevInfo
 
 struct ConsistencyCheckWorkload : TestWorkload
 {
@@ -101,15 +106,9 @@ struct ConsistencyCheckWorkload : TestWorkload
 		bytesReadInPreviousRound = 0;
 	}
 
-	virtual std::string description()
-	{
-		return "ConsistencyCheck";
-	}
+	std::string description() const override { return "ConsistencyCheck"; }
 
-	virtual Future<Void> setup(Database const& cx)
-	{
-		return _setup(cx, this);
-	}
+	Future<Void> setup(Database const& cx) override { return _setup(cx, this); }
 
 	ACTOR Future<Void> _setup(Database cx, ConsistencyCheckWorkload *self)
 	{
@@ -135,21 +134,14 @@ struct ConsistencyCheckWorkload : TestWorkload
 		return Void();
 	}
 
-	virtual Future<Void> start(Database const& cx)
-	{
+	Future<Void> start(Database const& cx) override {
 		TraceEvent("ConsistencyCheck");
 		return _start(cx, this);
 	}
 
-	virtual Future<bool> check(Database const& cx)
-	{
-		return success;
-	}
+	Future<bool> check(Database const& cx) override { return success; }
 
-	virtual void getMetrics( vector<PerfMetric>& m )
-	{
-
-	}
+	void getMetrics(vector<PerfMetric>& m) override {}
 
 	void testFailure(std::string message, bool isError = false)
 	{
@@ -361,9 +353,9 @@ struct ConsistencyCheckWorkload : TestWorkload
 		}
 	}
 
-	//Get a list of storage servers from the master and compares them with the TLogs.
-	//If this is a quiescent check, then each master proxy needs to respond, otherwise only one needs to respond.
-	//Returns false if there is a failure (in this case, keyServersPromise will never be set)
+	// Get a list of storage servers from the master and compares them with the TLogs.
+	// If this is a quiescent check, then each commit proxy needs to respond, otherwise only one needs to respond.
+	// Returns false if there is a failure (in this case, keyServersPromise will never be set)
 	ACTOR Future<bool> getKeyServers(Database cx, ConsistencyCheckWorkload *self, Promise<std::vector<std::pair<KeyRange, vector<StorageServerInterface>>>> keyServersPromise)
 	{
 		state std::vector<std::pair<KeyRange, vector<StorageServerInterface>>> keyServers;
@@ -373,12 +365,17 @@ struct ConsistencyCheckWorkload : TestWorkload
 		state Key begin = keyServersKeys.begin;
 		state Key end = keyServersKeys.end;
 		state int limitKeyServers = BUGGIFY ? 1 : 100;
+		state Span span(deterministicRandom()->randomUniqueID(), "WL:ConsistencyCheck"_loc);
 
 		while (begin < end) {
-			state Reference<ProxyInfo> proxyInfo = wait(cx->getMasterProxiesFuture(false));
+			state Reference<CommitProxyInfo> commitProxyInfo = wait(cx->getCommitProxiesFuture(false));
 			keyServerLocationFutures.clear();
-			for (int i = 0; i < proxyInfo->size(); i++)
-				keyServerLocationFutures.push_back(proxyInfo->get(i, &MasterProxyInterface::getKeyServersLocations).getReplyUnlessFailedFor(GetKeyServerLocationsRequest(begin, end, limitKeyServers, false, Arena()), 2, 0));
+			for (int i = 0; i < commitProxyInfo->size(); i++)
+				keyServerLocationFutures.push_back(
+				    commitProxyInfo->get(i, &CommitProxyInterface::getKeyServersLocations)
+				        .getReplyUnlessFailedFor(
+				            GetKeyServerLocationsRequest(span.context, begin, end, limitKeyServers, false, Arena()), 2,
+				            0));
 
 			state bool keyServersInsertedForThisIteration = false;
 			choose {
@@ -391,8 +388,9 @@ struct ConsistencyCheckWorkload : TestWorkload
 						//If performing quiescent check, then all master proxies should be reachable.  Otherwise, only one needs to be reachable
 						if (self->performQuiescentChecks && !shards.present())
 						{
-							TraceEvent("ConsistencyCheck_MasterProxyUnavailable").detail("MasterProxyID", proxyInfo->getId(i));
-							self->testFailure("Master proxy unavailable");
+							TraceEvent("ConsistencyCheck_CommitProxyUnavailable")
+							    .detail("CommitProxyID", commitProxyInfo->getId(i));
+							self->testFailure("Commit proxy unavailable");
 							return false;
 						}
 
@@ -409,7 +407,7 @@ struct ConsistencyCheckWorkload : TestWorkload
 						}
 					} // End of For
 				}
-				when(wait(cx->onMasterProxiesChanged())) { }
+				when(wait(cx->onProxiesChanged())) { }
 			} // End of choose
 
 			if (!keyServersInsertedForThisIteration) // Retry the entire workflow
@@ -443,6 +441,7 @@ struct ConsistencyCheckWorkload : TestWorkload
 					req.limit = SERVER_KNOBS->MOVE_KEYS_KRM_LIMIT;
 					req.limitBytes = SERVER_KNOBS->MOVE_KEYS_KRM_LIMIT_BYTES;
 					req.version = version;
+					req.tags = TagSet();
 
 					//Try getting the shard locations from the key servers
 					state vector<Future<ErrorOr<GetKeyValuesReply>>> keyValueFutures;
@@ -664,7 +663,9 @@ struct ConsistencyCheckWorkload : TestWorkload
 			tr.setOption(FDBTransactionOptions::LOCK_AWARE);
 			state int bytesReadInRange = 0;
 
-			decodeKeyServersValue(keyLocations[shard].value, sourceStorageServers, destStorageServers);
+			Standalone<RangeResultRef> UIDtoTagMap = wait( tr.getRange( serverTagKeys, CLIENT_KNOBS->TOO_MANY ) );
+			ASSERT( !UIDtoTagMap.more && UIDtoTagMap.size() < CLIENT_KNOBS->TOO_MANY );
+			decodeKeyServersValue(UIDtoTagMap, keyLocations[shard].value, sourceStorageServers, destStorageServers, false);
 
 			//If the destStorageServers is non-empty, then this shard is being relocated
 			state bool isRelocating = destStorageServers.size() > 0;
@@ -702,6 +703,7 @@ struct ConsistencyCheckWorkload : TestWorkload
 			state vector<UID> storageServers = (isRelocating) ? destStorageServers : sourceStorageServers;
 			state vector<StorageServerInterface> storageServerInterfaces;
 
+			//TraceEvent("ConsistencyCheck_GetStorageInfo").detail("StorageServers", storageServers.size());
 			loop {
 				try {
 					vector< Future< Optional<Value> > > serverListEntries;
@@ -714,6 +716,7 @@ struct ConsistencyCheckWorkload : TestWorkload
 						else if (self->performQuiescentChecks)
 							self->testFailure("/FF/serverList changing in a quiescent database");
 					}
+
 					break;
 				}
 				catch(Error &e) {
@@ -774,6 +777,7 @@ struct ConsistencyCheckWorkload : TestWorkload
 						req.limit = 1e4;
 						req.limitBytes = CLIENT_KNOBS->REPLY_BYTE_LIMIT;
 						req.version = version;
+						req.tags = TagSet();
 
 						//Try getting the entries in the specified range
 						state vector<Future<ErrorOr<GetKeyValuesReply>>> keyValueFutures;
@@ -910,7 +914,7 @@ struct ConsistencyCheckWorkload : TestWorkload
 							else if(!isRelocating)
 							{
 								TraceEvent("ConsistencyCheck_StorageServerUnavailable").suppressFor(1.0).detail("StorageServer", storageServers[j]).detail("ShardBegin", printable(range.begin)).detail("ShardEnd", printable(range.end))
-									.detail("Address", storageServerInterfaces[j].address()).detail("GetKeyValuesToken", storageServerInterfaces[j].getKeyValues.getEndpoint().token);
+									.detail("Address", storageServerInterfaces[j].address()).detail("UID", storageServerInterfaces[j].id()).detail("GetKeyValuesToken", storageServerInterfaces[j].getKeyValues.getEndpoint().token);
 
 								//All shards should be available in quiscence
 								if(self->performQuiescentChecks)
@@ -1136,12 +1140,12 @@ struct ConsistencyCheckWorkload : TestWorkload
 		std::set<Optional<Key>> missingStorage;
 
 		for( int i = 0; i < workers.size(); i++ ) {
-			NetworkAddress addr = workers[i].interf.tLog.getEndpoint().addresses.getTLSAddress();
-			if( !configuration.isExcludedServer(addr) &&
+			NetworkAddress addr = workers[i].interf.stableAddress();
+			if( !configuration.isExcludedServer(workers[i].interf.addresses()) &&
 				( workers[i].processClass == ProcessClass::StorageClass || workers[i].processClass == ProcessClass::UnsetClass ) ) {
 				bool found = false;
 				for( int j = 0; j < storageServers.size(); j++ ) {
-					if( storageServers[j].getValue.getEndpoint().addresses.getTLSAddress() == addr ) {
+					if( storageServers[j].stableAddress() == addr ) {
 						found = true;
 						break;
 					}
@@ -1168,20 +1172,51 @@ struct ConsistencyCheckWorkload : TestWorkload
 	}
 
 	ACTOR Future<bool> checkForExtraDataStores(Database cx, ConsistencyCheckWorkload *self) {
-		state vector<WorkerDetails> workers = wait( getWorkers( self->dbInfo ) );
-		state vector<StorageServerInterface> storageServers = wait( getStorageServers( cx ) );
+		state std::vector<WorkerDetails> workers = wait(getWorkers(self->dbInfo));
+		state std::vector<StorageServerInterface> storageServers = wait(getStorageServers(cx));
+		state std::vector<WorkerInterface> coordWorkers = wait(getCoordWorkers(cx, self->dbInfo));
 		auto& db = self->dbInfo->get();
 		state std::vector<TLogInterface> logs = db.logSystemConfig.allPresentLogs();
 
 		state std::vector<WorkerDetails>::iterator itr;
 		state bool foundExtraDataStore = false;
+		state std::vector<struct ProcessInfo*> protectedProcessesToKill;
 
 		state std::map<NetworkAddress, std::set<UID>> statefulProcesses;
 		for (const auto& ss : storageServers) {
 			statefulProcesses[ss.address()].insert(ss.id());
+			// A process may have two addresses (same ip, different ports)
+			if (ss.secondaryAddress().present()) {
+				statefulProcesses[ss.secondaryAddress().get()].insert(ss.id());
+			}
+			TraceEvent(SevCCheckInfo, "StatefulProcess")
+			    .detail("StorageServer", ss.id())
+			    .detail("PrimaryAddress", ss.address().toString())
+			    .detail("SecondaryAddress",
+			            ss.secondaryAddress().present() ? ss.secondaryAddress().get().toString() : "Unset");
 		}
 		for (const auto& log : logs) {
 			statefulProcesses[log.address()].insert(log.id());
+			if (log.secondaryAddress().present()) {
+				statefulProcesses[log.secondaryAddress().get()].insert(log.id());
+			}
+			TraceEvent(SevCCheckInfo, "StatefulProcess")
+			    .detail("Log", log.id())
+			    .detail("PrimaryAddress", log.address().toString())
+			    .detail("SecondaryAddress",
+			            log.secondaryAddress().present() ? log.secondaryAddress().get().toString() : "Unset");
+		}
+		// Coordinators are also stateful processes
+		for (const auto& cWorker : coordWorkers) {
+			statefulProcesses[cWorker.address()].insert(cWorker.id());
+			if (cWorker.secondaryAddress().present()) {
+				statefulProcesses[cWorker.secondaryAddress().get()].insert(cWorker.id());
+			}
+			TraceEvent(SevCCheckInfo, "StatefulProcess")
+			    .detail("Coordinator", cWorker.id())
+			    .detail("PrimaryAddress", cWorker.address().toString())
+			    .detail("SecondaryAddress",
+			            cWorker.secondaryAddress().present() ? cWorker.secondaryAddress().get().toString() : "Unset");
 		}
 
 		for(itr = workers.begin(); itr != workers.end(); ++itr) {
@@ -1192,23 +1227,45 @@ struct ConsistencyCheckWorkload : TestWorkload
 				return false;
 			}
 
+			TraceEvent(SevCCheckInfo, "ConsistencyCheck_ExtraDataStore")
+			    .detail("Worker", itr->interf.id().toString())
+			    .detail("PrimaryAddress", itr->interf.address().toString())
+			    .detail("SecondaryAddress", itr->interf.secondaryAddress().present()
+			                                    ? itr->interf.secondaryAddress().get().toString()
+			                                    : "Unset");
 			for (const auto& id : stores.get()) {
-				if(!statefulProcesses[itr->interf.address()].count(id)) {
-					TraceEvent("ConsistencyCheck_ExtraDataStore").detail("Address", itr->interf.address()).detail("DataStoreID", id);
-					if(g_network->isSimulated()) {
-						//FIXME: this is hiding the fact that we can recruit a new storage server on a location the has files left behind by a previous failure
-						// this means that the process is wasting disk space until the process is rebooting
-						auto p = g_simulator.getProcessByAddress(itr->interf.address());
-						TraceEvent("ConsistencyCheck_RebootProcess").detail("Address", itr->interf.address()).detail("DataStoreID", id).detail("Reliable", p->isReliable());
-						if(p->isReliable()) {
-							g_simulator.rebootProcess(p, ISimulator::RebootProcess);
-						} else {
-							g_simulator.killProcess(p, ISimulator::KillInstantly);
-						}
-					}
-
-					foundExtraDataStore = true;
+				if (statefulProcesses[itr->interf.address()].count(id)) {
+					continue;
 				}
+				// For extra data store
+				TraceEvent("ConsistencyCheck_ExtraDataStore")
+				    .detail("Address", itr->interf.address())
+				    .detail("DataStoreID", id);
+				if (g_network->isSimulated()) {
+					// FIXME: this is hiding the fact that we can recruit a new storage server on a location the has
+					// files left behind by a previous failure
+					// this means that the process is wasting disk space until the process is rebooting
+					ISimulator::ProcessInfo* p = g_simulator.getProcessByAddress(itr->interf.address());
+					// Note: itr->interf.address() may not equal to p->address() because role's endpoint's primary
+					// addr can be swapped by choosePrimaryAddress() based on its peer's tls config.
+					TraceEvent("ConsistencyCheck_RebootProcess")
+					    .detail("Address",
+					            itr->interf.address()) // worker's primary address (i.e., the first address)
+					    .detail("ProcessPrimaryAddress", p->address)
+					    .detail("ProcessAddresses", p->addresses.toString())
+					    .detail("DataStoreID", id)
+					    .detail("Protected", g_simulator.protectedAddresses.count(itr->interf.address()))
+					    .detail("Reliable", p->isReliable())
+					    .detail("ReliableInfo", p->getReliableInfo())
+					    .detail("KillOrRebootProcess", p->address);
+					if (p->isReliable()) {
+						g_simulator.rebootProcess(p, ISimulator::RebootProcess);
+					} else {
+						g_simulator.killProcess(p, ISimulator::KillInstantly);
+					}
+				}
+
+				foundExtraDataStore = true;
 			}
 		}
 
@@ -1239,7 +1296,7 @@ struct ConsistencyCheckWorkload : TestWorkload
 
 		vector<ISimulator::ProcessInfo*> all = g_simulator.getAllProcesses();
 		for(int i = 0; i < all.size(); i++) {
-			if( all[i]->isReliable() && all[i]->name == std::string("Server") && all[i]->startingClass != ProcessClass::TesterClass ) {
+			if( all[i]->isReliable() && all[i]->name == std::string("Server") && all[i]->startingClass != ProcessClass::TesterClass && all[i]->protocolVersion == g_network->protocolVersion() ) {
 				if(!workerAddresses.count(all[i]->address)) {
 					TraceEvent("ConsistencyCheck_WorkerMissingFromList").detail("Addr", all[i]->address);
 					return false;
@@ -1394,11 +1451,38 @@ struct ConsistencyCheckWorkload : TestWorkload
 			return false;
 		}
 
-		// Check proxy
-		ProcessClass::Fitness bestMasterProxyFitness = getBestAvailableFitness(dcToNonExcludedClassTypes[masterDcId], ProcessClass::Proxy);
-		for (auto masterProxy : db.client.proxies) {
-			if (!nonExcludedWorkerProcessMap.count(masterProxy.address()) || nonExcludedWorkerProcessMap[masterProxy.address()].processClass.machineClassFitness(ProcessClass::Proxy) != bestMasterProxyFitness) {
-				TraceEvent("ConsistencyCheck_ProxyNotBest").detail("BestMasterProxyFitness", bestMasterProxyFitness).detail("ExistingMasterProxyFitness", nonExcludedWorkerProcessMap.count(masterProxy.address()) ? nonExcludedWorkerProcessMap[masterProxy.address()].processClass.machineClassFitness(ProcessClass::Proxy) : -1);
+		// Check commit proxy
+		ProcessClass::Fitness bestCommitProxyFitness =
+		    getBestAvailableFitness(dcToNonExcludedClassTypes[masterDcId], ProcessClass::CommitProxy);
+		for (const auto& commitProxy : db.client.commitProxies) {
+			if (!nonExcludedWorkerProcessMap.count(commitProxy.address()) ||
+			    nonExcludedWorkerProcessMap[commitProxy.address()].processClass.machineClassFitness(
+			        ProcessClass::CommitProxy) != bestCommitProxyFitness) {
+				TraceEvent("ConsistencyCheck_CommitProxyNotBest")
+				    .detail("BestCommitProxyFitness", bestCommitProxyFitness)
+				    .detail("ExistingCommitProxyFitness",
+				            nonExcludedWorkerProcessMap.count(commitProxy.address())
+				                ? nonExcludedWorkerProcessMap[commitProxy.address()].processClass.machineClassFitness(
+				                      ProcessClass::CommitProxy)
+				                : -1);
+				return false;
+			}
+		}
+
+		// Check grv proxy
+		ProcessClass::Fitness bestGrvProxyFitness =
+		    getBestAvailableFitness(dcToNonExcludedClassTypes[masterDcId], ProcessClass::GrvProxy);
+		for (const auto& grvProxy : db.client.grvProxies) {
+			if (!nonExcludedWorkerProcessMap.count(grvProxy.address()) ||
+			    nonExcludedWorkerProcessMap[grvProxy.address()].processClass.machineClassFitness(
+			        ProcessClass::GrvProxy) != bestGrvProxyFitness) {
+				TraceEvent("ConsistencyCheck_GrvProxyNotBest")
+				    .detail("BestGrvProxyFitness", bestGrvProxyFitness)
+				    .detail("ExistingGrvProxyFitness",
+				            nonExcludedWorkerProcessMap.count(grvProxy.address())
+				                ? nonExcludedWorkerProcessMap[grvProxy.address()].processClass.machineClassFitness(
+				                      ProcessClass::GrvProxy)
+				                : -1);
 				return false;
 			}
 		}
@@ -1422,8 +1506,8 @@ struct ConsistencyCheckWorkload : TestWorkload
 							TraceEvent("ConsistencyCheck_LogRouterNotInNonExcludedWorkers").detail("Id", logRouter.id());
 							return false;
 						}
-						if (logRouter.interf().locality.dcId() != expectedRemoteDcId) {
-							TraceEvent("ConsistencyCheck_LogRouterNotBestDC").detail("expectedDC", getOptionalString(expectedRemoteDcId)).detail("ActualDC", getOptionalString(logRouter.interf().locality.dcId()));
+						if (logRouter.interf().filteredLocality.dcId() != expectedRemoteDcId) {
+							TraceEvent("ConsistencyCheck_LogRouterNotBestDC").detail("expectedDC", getOptionalString(expectedRemoteDcId)).detail("ActualDC", getOptionalString(logRouter.interf().filteredLocality.dcId()));
 							return false;
 						}
 					}

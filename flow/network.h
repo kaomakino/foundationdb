@@ -20,6 +20,7 @@
 
 #ifndef FLOW_OPENNETWORK_H
 #define FLOW_OPENNETWORK_H
+#include "flow/ProtocolVersion.h"
 #pragma once
 
 #include <array>
@@ -30,11 +31,13 @@
 #ifndef TLS_DISABLED
 #include "boost/asio/ssl.hpp"
 #endif
-#include "flow/serialize.h"
+#include "flow/Arena.h"
 #include "flow/IRandom.h"
+#include "flow/Trace.h"
 
 enum class TaskPriority {
 	Max = 1000000,
+	RunLoop = 30000,
 	ASIOReactor = 20001,
 	RunCycleFunction = 20000,
 	FlushTrace = 10500,
@@ -62,6 +65,7 @@ enum class TaskPriority {
 	TLogPeek = 8590,
 	TLogCommitReply = 8580,
 	TLogCommit = 8570,
+	ReportLiveCommittedVersion = 8567,
 	ProxyGetRawCommittedVersion = 8565,
 	ProxyMasterVersionReply = 8560,
 	ProxyCommitYield2 = 8557,
@@ -74,6 +78,8 @@ enum class TaskPriority {
 	TLogConfirmRunning = 8520,
 	ProxyGRVTimer = 8510,
 	GetConsistentReadVersion = 8500,
+	GetLiveCommittedVersionReply = 8490,
+	GetLiveCommittedVersion = 8480,
 	DefaultPromiseEndpoint = 8000,
 	DefaultOnMainThread = 7500,
 	DefaultDelay = 7010,
@@ -84,16 +90,20 @@ enum class TaskPriority {
 	MoveKeys = 3550,
 	DataDistributionLaunch = 3530,
 	Ratekeeper = 3510,
-	DataDistribution = 3500,
+	DataDistribution = 3502,
+	DataDistributionLow = 3501,
+	DataDistributionVeryLow = 3500,
 	DiskWrite = 3010,
 	UpdateStorage = 3000,
 	CompactCache = 2900,
 	TLogSpilledPeekReply = 2800,
 	FetchKeys = 2500,
-	RestoreApplierWriteDB = 2400,
-	RestoreApplierReceiveMutations = 2310,
-	RestoreLoaderSendMutations = 2300,
+	RestoreApplierWriteDB = 2310,
+	RestoreApplierReceiveMutations = 2300,
+	RestoreLoaderFinishVersionBatch = 2220,
+	RestoreLoaderSendMutations = 2210,
 	RestoreLoaderLoadFiles = 2200,
+	LowPriorityRead = 2100,
 	Low = 2000,
 
 	Min = 1000,
@@ -116,19 +126,11 @@ inline TaskPriority incrementPriorityIfEven(TaskPriority p) {
 
 class Void;
 
-template<class T> class Optional;
-
 struct IPAddress {
 	typedef boost::asio::ip::address_v6::bytes_type IPAddressStore;
 	static_assert(std::is_same<IPAddressStore, std::array<uint8_t, 16>>::value,
 	              "IPAddressStore must be std::array<uint8_t, 16>");
 
-private:
-	struct IsV6Visitor : boost::static_visitor<> {
-		bool result = false;
-		void operator() (const IPAddressStore&) { result = true; }
-		void operator() (const uint32_t&) { result = false; }
-	};
 public:
 	// Represents both IPv4 and IPv6 address. For IPv4 addresses,
 	// only the first 32bits are relevant and rest are initialized to
@@ -137,18 +139,14 @@ public:
 	explicit IPAddress(const IPAddressStore& v6addr) : addr(v6addr) {}
 	explicit IPAddress(uint32_t v4addr) : addr(v4addr) {}
 
-	bool isV6() const {
-		IsV6Visitor visitor;
-		boost::apply_visitor(visitor, addr);
-		return visitor.result;
-	}
+	bool isV6() const { return std::holds_alternative<IPAddressStore>(addr); }
 	bool isV4() const { return !isV6(); }
 	bool isValid() const;
 
 	// Returns raw v4/v6 representation of address. Caller is responsible
 	// to call these functions safely.
-	uint32_t toV4() const { return boost::get<uint32_t>(addr); }
-	const IPAddressStore& toV6() const { return boost::get<IPAddressStore>(addr); }
+	uint32_t toV4() const { return std::get<uint32_t>(addr); }
+	const IPAddressStore& toV6() const { return std::get<IPAddressStore>(addr); }
 
 	std::string toString() const;
 	static Optional<IPAddress> parse(std::string str);
@@ -189,7 +187,7 @@ public:
 	}
 
 private:
-	boost::variant<uint32_t, IPAddressStore> addr;
+	std::variant<uint32_t, IPAddressStore> addr;
 };
 
 template<>
@@ -226,11 +224,25 @@ struct NetworkAddress {
 			return ip < r.ip;
 		return port < r.port;
 	}
+	bool operator>(NetworkAddress const& r) const { return r < *this; }
+	bool operator<=(NetworkAddress const& r) const { return !(*this > r); }
+	bool operator>=(NetworkAddress const& r) const { return !(*this < r); }
 
 	bool isValid() const { return ip.isValid() || port != 0; }
 	bool isPublic() const { return !(flags & FLAG_PRIVATE); }
 	bool isTLS() const { return (flags & FLAG_TLS) != 0; }
 	bool isV6() const { return ip.isV6(); }
+
+	size_t hash() const {
+		size_t result = 0;
+		if (ip.isV6()) {
+			uint16_t* ptr = (uint16_t*)ip.toV6().data();
+			result = ((size_t)ptr[5] << 32) | ((size_t)ptr[6] << 16) | ptr[7];
+		} else {
+			result = ip.toV4();
+		}
+		return (result << 16) + port;
+	}
 
 	static NetworkAddress parse(std::string const&); // May throw connection_string_invalid
 	static Optional<NetworkAddress> parseOptional(std::string const&);
@@ -267,14 +279,7 @@ namespace std
 	{
 		size_t operator()(const NetworkAddress& na) const
 		{
-			size_t result = 0;
-			if (na.ip.isV6()) {
-				uint16_t* ptr = (uint16_t*)na.ip.toV6().data();
-				result = ((size_t)ptr[5] << 32) | ((size_t)ptr[6] << 16) | ptr[7];
-			} else {
-				result = na.ip.toV4();
-			}
-			return (result << 16) + na.port;
+			return na.hash();
 		}
 	};
 }
@@ -322,21 +327,35 @@ struct NetworkMetrics {
 	enum { SLOW_EVENT_BINS = 16 };
 	uint64_t countSlowEvents[SLOW_EVENT_BINS] = {};
 
-	enum { PRIORITY_BINS = 9 };
-	TaskPriority priorityBins[PRIORITY_BINS] = {};
-	bool priorityBlocked[PRIORITY_BINS] = {};
-	double priorityBlockedDuration[PRIORITY_BINS] = {};
-	double priorityMaxBlockedDuration[PRIORITY_BINS] = {};
-	double priorityTimer[PRIORITY_BINS] = {};
-	double windowedPriorityTimer[PRIORITY_BINS] = {};
-
 	double secSquaredSubmit = 0;
 	double secSquaredDiskStall = 0;
 
-	NetworkMetrics() {}
+	struct PriorityStats {
+		TaskPriority priority;
+
+		bool active = false;
+		double duration = 0;
+		double timer = 0;
+		double windowedTimer = 0;
+		double maxDuration = 0;
+
+		PriorityStats(TaskPriority priority) : priority(priority) {}
+	};
+
+	std::unordered_map<TaskPriority, struct PriorityStats> activeTrackers;
+	double lastRunLoopBusyness;
+	std::vector<struct PriorityStats> starvationTrackers;
+
+	static const std::vector<int> starvationBins;
+
+	NetworkMetrics() : lastRunLoopBusyness(0) {
+		for(int priority : starvationBins) {
+			starvationTrackers.emplace_back(static_cast<TaskPriority>(priority));
+		}
+	}
 };
 
-struct BoundedFlowLock;
+struct FlowLock;
 
 struct NetworkInfo {
 	NetworkMetrics metrics;
@@ -345,7 +364,7 @@ struct NetworkInfo {
 	double lastAlternativesFailureSkipDelay = 0;
 
 	std::map<std::pair<IPAddress, uint16_t>, std::pair<int,double>> serverTLSConnectionThrottler;
-	BoundedFlowLock* handshakeLock;
+	FlowLock *handshakeLock;
 
 	NetworkInfo();
 };
@@ -356,6 +375,9 @@ public:
 	virtual int getFD() = 0;
 	virtual Future<int64_t> read() = 0;
 };
+
+// forward declare SendBuffer, declared in serialize.h
+struct SendBuffer;
 
 class IConnection {
 public:
@@ -370,9 +392,11 @@ public:
 
 	virtual Future<Void> connectHandshake() = 0;
 
+	// Precondition: write() has been called and last returned 0
 	// returns when write() can write at least one byte (or may throw an error if the connection dies)
 	virtual Future<Void> onWritable() = 0;
 
+	// Precondition: read() has been called and last returned 0
 	// returns when read() can read at least one byte (or may throw an error if the connection dies)
 	virtual Future<Void> onReadable() = 0;
 
@@ -391,9 +415,9 @@ public:
 
 	// Returns the network address and port of the other end of the connection.  In the case of an incoming connection, this may not
 	// be an address we can connect to!
-	virtual NetworkAddress getPeerAddress() = 0;
+	virtual NetworkAddress getPeerAddress() const = 0;
 
-	virtual UID getDebugID() = 0;
+	virtual UID getDebugID() const = 0;
 };
 
 class IListener {
@@ -404,7 +428,7 @@ public:
 	// Returns one incoming connection when it is available.  Do not cancel unless you are done with the listener!
 	virtual Future<Reference<IConnection>> accept() = 0;
 
-	virtual NetworkAddress getListenAddress() = 0;
+	virtual NetworkAddress getListenAddress() const = 0;
 };
 
 typedef void*	flowGlobalType;
@@ -435,18 +459,22 @@ public:
 		enASIOTimedOut = 9,
 		enBlobCredentialFiles = 10,
 		enNetworkAddressesFunc = 11,
-		enClientFailureMonitor = 12
+		enClientFailureMonitor = 12,
+		enSQLiteInjectedError = 13
 	};
 
 	virtual void longTaskCheck( const char* name ) {}
 
-	virtual double now() = 0;
+	virtual double now() const = 0;
 	// Provides a clock that advances at a similar rate on all connected endpoints
 	// FIXME: Return a fixed point Time class
 
 	virtual double timer() = 0;
 	// A wrapper for directly getting the system time. The time returned by now() only updates in the run loop, 
 	// so it cannot be used to measure times of functions that do not have wait statements.
+
+	virtual double timer_monotonic() = 0;
+	// Similar to timer, but monotonic
 
 	virtual Future<class Void> delay( double seconds, TaskPriority taskID ) = 0;
 	// The given future will be set after seconds have elapsed
@@ -457,17 +485,21 @@ public:
 	virtual bool check_yield( TaskPriority taskID ) = 0;
 	// Returns true if a call to yield would result in a delay
 
-	virtual TaskPriority getCurrentTask() = 0;
+	virtual TaskPriority getCurrentTask() const = 0;
 	// Gets the taskID/priority of the current task
 
 	virtual void setCurrentTask(TaskPriority taskID ) = 0;
 	// Sets the taskID/priority of the current task, without yielding
 
-	virtual flowGlobalType global(int id) = 0;
+	virtual flowGlobalType global(int id) const = 0;
 	virtual void setGlobal(size_t id, flowGlobalType v) = 0;
 
 	virtual void stop() = 0;
 	// Terminate the program
+
+	virtual void addStopCallback( std::function<void()> fn ) = 0;
+	// Calls `fn` when stop() is called.
+	// addStopCallback can be called more than once, and each added `fn` will be run once.
 
 	virtual bool isSimulated() const = 0;
 	// Returns true if this network is a local simulation
@@ -487,17 +519,23 @@ public:
 	virtual void initMetrics() {}
 	// Metrics must be initialized after FlowTransport::createInstance has been called
 
-	virtual void initTLS() {}
 	// TLS must be initialized before using the network
+	enum ETLSInitState { NONE = 0, CONFIG = 1, CONNECT = 2, LISTEN = 3};
+	virtual void initTLS(ETLSInitState targetState = CONFIG) {}
 
-	virtual const TLSConfig& getTLSConfig() = 0;
+	virtual const TLSConfig& getTLSConfig() const = 0;
 	// Return the TLS Configuration
 
 	virtual void getDiskBytes( std::string const& directory, int64_t& free, int64_t& total) = 0;
 	//Gets the number of free and total bytes available on the disk which contains directory
 
-	virtual bool isAddressOnThisHost( NetworkAddress const& addr ) = 0;
+	virtual bool isAddressOnThisHost(NetworkAddress const& addr) const = 0;
 	// Returns true if it is reasonably certain that a connection to the given address would be a fast loopback connection
+
+	// If the network has not been run and this function has not been previously called, returns true. Otherwise, returns false.
+	virtual bool checkRunnable() = 0;
+
+	virtual ProtocolVersion protocolVersion() = 0;
 
 	// Shorthand for transport().getLocalAddress()
 	static NetworkAddress getLocalAddress()
@@ -520,6 +558,27 @@ protected:
 	~INetwork() {}	// Please don't try to delete through this interface!
 };
 
+class IUDPSocket {
+public:
+	//  see https://en.wikipedia.org/wiki/User_Datagram_Protocol - the max size of a UDP packet
+	// This is enforced in simulation
+	constexpr static size_t MAX_PACKET_SIZE = 65535;
+	virtual ~IUDPSocket();
+	virtual void addref() = 0;
+	virtual void delref() = 0;
+
+	virtual void close() = 0;
+	virtual Future<int> send(uint8_t const* begin, uint8_t const* end) = 0;
+	virtual Future<int> sendTo(uint8_t const* begin, uint8_t const* end, NetworkAddress const& peer) = 0;
+	virtual Future<int> receive(uint8_t* begin, uint8_t* end) = 0;
+	virtual Future<int> receiveFrom(uint8_t* begin, uint8_t* end, NetworkAddress* sender) = 0;
+	virtual void bind(NetworkAddress const& addr) = 0;
+
+	virtual UID getDebugID() const = 0;
+	virtual NetworkAddress localAddress() const = 0;
+	virtual boost::asio::ip::udp::socket::native_handle_type native_handle() = 0;
+};
+
 class INetworkConnections {
 public:
 	// Methods for making and accepting network connections.  Logically this is part of the INetwork abstraction
@@ -527,14 +586,21 @@ public:
 	// security to override only these operations without having to delegate everything in INetwork.
 
 	// Make an outgoing connection to the given address.  May return an error or block indefinitely in case of connection problems!
-	virtual Future<Reference<IConnection>> connect( NetworkAddress toAddr, std::string host = "") = 0;
+	virtual Future<Reference<IConnection>> connect( NetworkAddress toAddr, const std::string &host = "") = 0;
+
+	virtual Future<Reference<IConnection>> connectExternal(NetworkAddress toAddr, const std::string &host = "") = 0;
+
+	// Make an outgoing udp connection and connect to the passed address.
+	virtual Future<Reference<IUDPSocket>> createUDPSocket(NetworkAddress toAddr) = 0;
+	// Make an outgoing udp connection without establishing a connection
+	virtual Future<Reference<IUDPSocket>> createUDPSocket(bool isV6 = false) = 0;
 
 	// Resolve host name and service name (such as "http" or can be a plain number like "80") to a list of 1 or more NetworkAddresses
-	virtual Future<std::vector<NetworkAddress>> resolveTCPEndpoint( std::string host, std::string service ) = 0;
+	virtual Future<std::vector<NetworkAddress>> resolveTCPEndpoint(const std::string &host, const std::string &service ) = 0;
 
 	// Convenience function to resolve host/service and connect to one of its NetworkAddresses randomly
 	// useTLS has to be a parameter here because it is passed to connect() as part of the toAddr object.
-	virtual Future<Reference<IConnection>> connect( std::string host, std::string service, bool useTLS = false);
+	virtual Future<Reference<IConnection>> connect( const std::string &host, const std::string &service, bool useTLS = false);
 
 	// Listen for connections on the given local address
 	virtual Reference<IListener> listen( NetworkAddress localAddr ) = 0;

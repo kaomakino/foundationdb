@@ -189,11 +189,18 @@ struct CoordinatedStateImpl {
 	}
 };
 
-CoordinatedState::CoordinatedState( ServerCoordinators const& coord ) : impl( new CoordinatedStateImpl(coord) ) { }
-CoordinatedState::~CoordinatedState() { delete impl; }
-Future<Value> CoordinatedState::read() { return CoordinatedStateImpl::read(impl); }
-Future<Void> CoordinatedState::onConflict() { return CoordinatedStateImpl::onConflict(impl); }
-Future<Void> CoordinatedState::setExclusive(Value v) { return CoordinatedStateImpl::setExclusive(impl,v); }
+CoordinatedState::CoordinatedState(ServerCoordinators const& coord)
+  : impl(std::make_unique<CoordinatedStateImpl>(coord)) {}
+CoordinatedState::~CoordinatedState() = default;
+Future<Value> CoordinatedState::read() {
+	return CoordinatedStateImpl::read(impl.get());
+}
+Future<Void> CoordinatedState::onConflict() {
+	return CoordinatedStateImpl::onConflict(impl.get());
+}
+Future<Void> CoordinatedState::setExclusive(Value v) {
+	return CoordinatedStateImpl::setExclusive(impl.get(), v);
+}
 uint64_t CoordinatedState::getConflict() { return impl->getConflict(); }
 
 struct MovableValue {
@@ -210,6 +217,7 @@ struct MovableValue {
 	MovableValue() : mode( Active ) {}
 	MovableValue( Value const& v, int mode, Optional<Value> other = Optional<Value>() ) : value( v ), mode( mode ), other( other ) {}
 
+	//To change this serialization, ProtocolVersion::MovableCoordinatedStateV2 must be updated, and downgrades need to be considered
 	template <class Ar>
 	void serialize(Ar& ar) {
 		ASSERT( ar.protocolVersion().hasMovableCoordinatedState() );
@@ -238,7 +246,7 @@ struct MovableCoordinatedStateImpl {
 		}
 		// SOMEDAY: If moveState.mode == MovingFrom, read (without locking) old state and assert that it corresponds with our state and is ReallyTo(coordinators)
 		if (moveState.mode == MovableValue::MaybeTo) {
-			TEST(true);
+			TEST(true); // Maybe moveto state
 			ASSERT( moveState.other.present() );
 			wait( self->moveTo( self, &self->cs, ClusterConnectionString( moveState.other.get().toString() ), moveState.value ) );
 		}
@@ -251,7 +259,7 @@ struct MovableCoordinatedStateImpl {
 
 	Future<Void> setExclusive( Value v ) {
 		lastValue=v;
-		lastCSValue=BinaryWriter::toValue( MovableValue( v, MovableValue::Active ), IncludeVersion() );
+		lastCSValue=BinaryWriter::toValue( MovableValue( v, MovableValue::Active ), IncludeVersion(ProtocolVersion::withMovableCoordinatedStateV2()) );
 		return cs.setExclusive( lastCSValue.get() );
 	}
 
@@ -275,7 +283,7 @@ struct MovableCoordinatedStateImpl {
 
 		choose {
 			when (wait(creationTimeout)) { throw new_coordinators_timed_out(); }
-			when ( wait( nccs.setExclusive( BinaryWriter::toValue( MovableValue( self->lastValue.get(), MovableValue::MovingFrom, self->coordinators.ccf->getConnectionString().toString() ), IncludeVersion() ) ) ) ) {}
+			when ( wait( nccs.setExclusive( BinaryWriter::toValue( MovableValue( self->lastValue.get(), MovableValue::MovingFrom, self->coordinators.ccf->getConnectionString().toString() ), IncludeVersion(ProtocolVersion::withMovableCoordinatedStateV2()) ) ) ) ) {}
 		}
 
 		if (BUGGIFY) wait(delay(5));
@@ -293,7 +301,7 @@ struct MovableCoordinatedStateImpl {
 	}
 
 	ACTOR static Future<Void> moveTo( MovableCoordinatedStateImpl* self, CoordinatedState* coordinatedState, ClusterConnectionString nc, Value value ) {
-		wait( coordinatedState->setExclusive( BinaryWriter::toValue( MovableValue( value, MovableValue::MaybeTo, nc.toString() ), IncludeVersion() ) ) );
+		wait( coordinatedState->setExclusive( BinaryWriter::toValue( MovableValue( value, MovableValue::MaybeTo, nc.toString() ), IncludeVersion(ProtocolVersion::withMovableCoordinatedStateV2()) ) ) );
 
 		if (BUGGIFY) wait( delay(5) );
 
@@ -305,20 +313,15 @@ struct MovableCoordinatedStateImpl {
 	}
 };
 
-void MovableCoordinatedState::operator=(MovableCoordinatedState&& av) { 
-	if(impl) {
-		delete impl;
-	}
-	impl = av.impl; 
-	av.impl = 0; 
+MovableCoordinatedState& MovableCoordinatedState::operator=(MovableCoordinatedState&&) = default;
+MovableCoordinatedState::MovableCoordinatedState(class ServerCoordinators const& coord)
+  : impl(std::make_unique<MovableCoordinatedStateImpl>(coord)) {}
+MovableCoordinatedState::~MovableCoordinatedState() = default;
+Future<Value> MovableCoordinatedState::read() {
+	return MovableCoordinatedStateImpl::read(impl.get());
 }
-MovableCoordinatedState::MovableCoordinatedState( class ServerCoordinators const& coord ) : impl( new MovableCoordinatedStateImpl(coord) ) {}
-MovableCoordinatedState::~MovableCoordinatedState() { 
-	if(impl) {
-		delete impl; 
-	}
-}
-Future<Value> MovableCoordinatedState::read() { return MovableCoordinatedStateImpl::read(impl); }
 Future<Void> MovableCoordinatedState::onConflict() { return impl->onConflict(); }
 Future<Void> MovableCoordinatedState::setExclusive(Value v) { return impl->setExclusive(v); }
-Future<Void> MovableCoordinatedState::move( ClusterConnectionString const& nc ) { return MovableCoordinatedStateImpl::move(impl, nc); }
+Future<Void> MovableCoordinatedState::move(ClusterConnectionString const& nc) {
+	return MovableCoordinatedStateImpl::move(impl.get(), nc);
+}

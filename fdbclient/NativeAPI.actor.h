@@ -19,6 +19,8 @@
  */
 
 #pragma once
+#include "flow/IRandom.h"
+#include "flow/Tracing.h"
 #if defined(NO_INTELLISENSE) && !defined(FDBCLIENT_NATIVEAPI_ACTOR_G_H)
 	#define FDBCLIENT_NATIVEAPI_ACTOR_G_H
 	#include "fdbclient/NativeAPI.actor.g.h"
@@ -28,11 +30,12 @@
 #include "flow/flow.h"
 #include "flow/TDMetric.actor.h"
 #include "fdbclient/FDBTypes.h"
-#include "fdbclient/MasterProxyInterface.h"
+#include "fdbclient/CommitProxyInterface.h"
 #include "fdbclient/FDBOptions.g.h"
 #include "fdbclient/CoordinationInterface.h"
 #include "fdbclient/ClusterInterface.h"
 #include "fdbclient/ClientLogEvents.h"
+#include "fdbclient/KeyRangeMap.h"
 #include "flow/actorcompiler.h" // has to be last include
 
 // CLIENT_BUGGIFY should be used to randomly introduce failures at run time (like BUGGIFY but for client side testing)
@@ -58,9 +61,10 @@ struct NetworkOptions {
 	std::string traceLogGroup;
 	std::string traceFormat;
 	std::string traceClockSource;
+	std::string traceFileIdentifier;
 	Optional<bool> logClientInfo;
 	Reference<ReferencedObject<Standalone<VectorRef<ClientVersionRef>>>> supportedVersions;
-	bool slowTaskProfilingEnabled;
+	bool runLoopProfilingEnabled;
 
 	NetworkOptions();
 };
@@ -75,8 +79,8 @@ public:
 	Database() {}  // an uninitialized database can be destructed or reassigned safely; that's it
 	void operator= ( Database const& rhs ) { db = rhs.db; }
 	Database( Database const& rhs ) : db(rhs.db) {}
-	Database(Database&& r) BOOST_NOEXCEPT : db(std::move(r.db)) {}
-	void operator= (Database&& r) BOOST_NOEXCEPT { db = std::move(r.db); }
+	Database(Database&& r) noexcept : db(std::move(r.db)) {}
+	void operator=(Database&& r) noexcept { db = std::move(r.db); }
 
 	// For internal use by the native client:
 	explicit Database(Reference<DatabaseContext> cx) : db(cx) {}
@@ -128,19 +132,38 @@ struct TransactionOptions {
 	bool readOnly : 1;
 	bool firstInBatch : 1;
 	bool includePort : 1;
+	bool reportConflictingKeys : 1;
+	bool expensiveClearCostEstimation : 1;
+
+	TransactionPriority priority;
+
+	TagSet tags; // All tags set on transaction
+	TagSet readTags; // Tags that can be sent with read requests
+
+	// update clear function if you add a new field
 
 	TransactionOptions(Database const& cx);
 	TransactionOptions();
 
 	void reset(Database const& cx);
+
+private:
+	void clear();
 };
 
+class ReadYourWritesTransaction; // workaround cyclic dependency
 struct TransactionInfo {
 	Optional<UID> debugID;
 	TaskPriority taskID;
+	SpanID spanID;
 	bool useProvisionalProxies;
+	// Used to save conflicting keys if FDBTransactionOptions::REPORT_CONFLICTING_KEYS is enabled
+	// prefix/<key1> : '1' - any keys equal or larger than this key are (probably) conflicting keys
+	// prefix/<key2> : '0' - any keys equal or larger than this key are (definitely) not conflicting keys
+	std::shared_ptr<CoalescedKeyRangeMap<Value>> conflictingKeys;
 
-	explicit TransactionInfo( TaskPriority taskID ) : taskID(taskID), useProvisionalProxies(false) {}
+	explicit TransactionInfo(TaskPriority taskID, SpanID spanID)
+	  : taskID(taskID), spanID(spanID), useProvisionalProxies(false) {}
 };
 
 struct TransactionLogInfo : public ReferenceCounted<TransactionLogInfo>, NonCopyable {
@@ -156,7 +179,7 @@ struct TransactionLogInfo : public ReferenceCounted<TransactionLogInfo>, NonCopy
 	template <typename T>
 	void addLog(const T& event) {
 		if(logLocation & TRACE_LOG) {
-			ASSERT(!identifier.empty())
+			ASSERT(!identifier.empty());
 			event.logEvent(identifier, maxFieldLength);
 		}
 
@@ -243,7 +266,11 @@ public:
 	// Pass a negative value for `shardLimit` to indicate no limit on the shard number.
 	Future< StorageMetrics > getStorageMetrics( KeyRange const& keys, int shardLimit );
 	Future< Standalone<VectorRef<KeyRef>> > splitStorageMetrics( KeyRange const& keys, StorageMetrics const& limit, StorageMetrics const& estimated );
+	Future<Standalone<VectorRef<ReadHotRangeWithMetrics>>> getReadHotRanges(KeyRange const& keys);
 
+	// Try to split the given range into equally sized chunks based on estimated size.
+	// The returned list would still be in form of [keys.begin, splitPoint1, splitPoint2, ... , keys.end]
+	Future<Standalone<VectorRef<KeyRef>>> getRangeSplitPoints(KeyRange const& keys, int64_t chunkSize);
 	// If checkWriteConflictRanges is true, existing write conflict ranges will be searched for this key
 	void set( const KeyRef& key, const ValueRef& value, bool addConflictRange = true );
 	void atomicOp( const KeyRef& key, const ValueRef& value, MutationRef::Type operationType, bool addConflictRange = true );
@@ -257,6 +284,8 @@ public:
 	[[nodiscard]] Future<Standalone<StringRef>>
 	getVersionstamp(); // Will be fulfilled only after commit() returns success
 
+	Future<uint64_t> getProtocolVersion();
+
 	Promise<Standalone<StringRef>> versionstampPromise;
 
 	uint32_t getSize();
@@ -264,8 +293,8 @@ public:
 	void flushTrLogsIfEnabled();
 
 	// These are to permit use as state variables in actors:
-	Transaction() : info( TaskPriority::DefaultEndpoint ) {}
-	void operator=(Transaction&& r) BOOST_NOEXCEPT;
+	Transaction();
+	void operator=(Transaction&& r) noexcept;
 
 	void reset();
 	void fullReset();
@@ -290,12 +319,23 @@ public:
 	}
 	static Reference<TransactionLogInfo> createTrLogInfoProbabilistically(const Database& cx);
 	TransactionOptions options;
+	Span span;
 	double startTime;
 	Reference<TransactionLogInfo> trLogInfo;
+
+	void setTransactionID(uint64_t id);
+	void setToken(uint64_t token);
+
+	const vector<Future<std::pair<Key, Key>>>& getExtraReadConflictRanges() const { return extraConflictRanges; }
+	Standalone<VectorRef<KeyRangeRef>> readConflictRanges() const {
+		return Standalone<VectorRef<KeyRangeRef>>(tr.transaction.read_conflict_ranges, tr.arena);
+	}
+	Standalone<VectorRef<KeyRangeRef>> writeConflictRanges() const {
+		return Standalone<VectorRef<KeyRangeRef>>(tr.transaction.write_conflict_ranges, tr.arena);
+	}
+
 private:
 	Future<Version> getReadVersion(uint32_t flags);
-	void setPriority(uint32_t priorityFlag);
-
 	Database cx;
 
 	double backoff;
@@ -308,7 +348,9 @@ private:
 	Future<Void> committing;
 };
 
-ACTOR Future<Version> waitForCommittedVersion(Database cx, Version version);
+ACTOR Future<Version> waitForCommittedVersion(Database cx, Version version, SpanID spanContext);
+ACTOR Future<Standalone<VectorRef<DDMetricsRef>>> waitDataDistributionMetricsList(Database cx, KeyRange keys,
+                                                                               int shardLimit);
 
 std::string unprintable( const std::string& );
 
@@ -321,5 +363,10 @@ ACTOR Future<Void> snapCreate(Database cx, Standalone<StringRef> snapCmd, UID sn
 // Checks with Data Distributor that it is safe to mark all servers in exclusions as failed
 ACTOR Future<bool> checkSafeExclusions(Database cx, vector<AddressExclusion> exclusions);
 
+ACTOR Future<uint64_t> getCoordinatorProtocols(Reference<ClusterConnectionFile> f);
+
+inline uint64_t getWriteOperationCost(uint64_t bytes) {
+	return bytes / std::max(1, CLIENT_KNOBS->WRITE_COST_BYTE_FACTOR) + 1;
+}
 #include "flow/unactorcompiler.h"
 #endif

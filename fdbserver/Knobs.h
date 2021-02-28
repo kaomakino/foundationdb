@@ -37,14 +37,14 @@ public:
 	int64_t MAX_VERSIONS_IN_FLIGHT_FORCED;
 	int64_t MAX_READ_TRANSACTION_LIFE_VERSIONS;
 	int64_t MAX_WRITE_TRANSACTION_LIFE_VERSIONS;
-	double MAX_COMMIT_BATCH_INTERVAL; // Each master proxy generates a CommitTransactionBatchRequest at least this often, so that versions always advance smoothly
+	double MAX_COMMIT_BATCH_INTERVAL; // Each commit proxy generates a CommitTransactionBatchRequest at least this
+	                                  // often, so that versions always advance smoothly
 
 	// TLogs
-	double TLOG_TIMEOUT;  // tlog OR master proxy failure - master's reaction time
+	double TLOG_TIMEOUT; // tlog OR commit proxy failure - master's reaction time
 	double RECOVERY_TLOG_SMART_QUORUM_DELAY;		// smaller might be better for bug amplification
 	double TLOG_STORAGE_MIN_UPDATE_INTERVAL;
 	double BUGGIFY_TLOG_STORAGE_MIN_UPDATE_INTERVAL;
-	double UNFLUSHED_DATA_RATIO;
 	int DESIRED_TOTAL_BYTES;
 	int DESIRED_UPDATE_BYTES;
 	double UPDATE_DELAY;
@@ -86,6 +86,20 @@ public:
 	int64_t MAX_CACHE_VERSIONS;
 	double TXS_POPPED_MAX_DELAY;
 	double TLOG_MAX_CREATE_DURATION;
+	int PEEK_LOGGING_AMOUNT;
+	double PEEK_LOGGING_DELAY;
+	double PEEK_RESET_INTERVAL;
+	double PEEK_MAX_LATENCY;
+	bool PEEK_COUNT_SMALL_MESSAGES;
+	double PEEK_STATS_INTERVAL;
+	double PEEK_STATS_SLOW_AMOUNT;
+	double PEEK_STATS_SLOW_RATIO;
+	double PUSH_RESET_INTERVAL;
+	double PUSH_MAX_LATENCY;
+	double PUSH_STATS_INTERVAL;
+	double PUSH_STATS_SLOW_AMOUNT;
+	double PUSH_STATS_SLOW_RATIO;
+	int TLOG_POP_BATCH_SIZE;
 
 	// Data distribution queue
 	double HEALTH_POLL_TIME;
@@ -135,7 +149,8 @@ public:
 	int64_t SHARD_MAX_BYTES_PER_KSEC, // Shards with more than this bandwidth will be split immediately
 		SHARD_MIN_BYTES_PER_KSEC,     // Shards with more than this bandwidth will not be merged
 		SHARD_SPLIT_BYTES_PER_KSEC;   // When splitting a shard, it is split into pieces with less than this bandwidth
-	int64_t SHARD_MAX_BYTES_READ_PER_KSEC;
+	double SHARD_MAX_READ_DENSITY_RATIO;
+	int64_t SHARD_READ_HOT_BANDWITH_MIN_PER_KSECONDS;
 	double SHARD_MAX_BYTES_READ_PER_KSEC_JITTER;
 	double STORAGE_METRIC_TIMEOUT;
 	double METRIC_DELAY;
@@ -162,6 +177,7 @@ public:
 	int64_t DD_SHARD_SIZE_GRANULARITY;
 	int64_t DD_SHARD_SIZE_GRANULARITY_SIM;
 	int DD_MOVE_KEYS_PARALLELISM;
+	int DD_FETCH_SOURCE_PARALLELISM;
 	int DD_MERGE_LIMIT;
 	double DD_SHARD_METRICS_TIMEOUT;
 	int64_t DD_LOCATION_CACHE_SIZE;
@@ -173,6 +189,12 @@ public:
 	bool DD_VALIDATE_LOCALITY;
 	int DD_CHECK_INVALID_LOCALITY_DELAY;
 	bool DD_ENABLE_VERBOSE_TRACING;
+	int64_t DD_SS_FAILURE_VERSIONLAG; // Allowed SS version lag from the current read version before marking it as failed.
+	int64_t DD_SS_ALLOWED_VERSIONLAG; // SS will be marked as healthy if it's version lag goes below this value.
+	double DD_SS_STUCK_TIME_LIMIT; // If a storage server is not getting new versions for this amount of time, then it becomes undesired.
+	int DD_TEAMS_INFO_PRINT_INTERVAL;
+	int DD_TEAMS_INFO_PRINT_YIELD_COUNT;
+	int DD_TEAM_ZERO_SERVER_LEFT_LOG_DELAY;
 
 	// TeamRemover to remove redundant teams
 	bool TR_FLAG_DISABLE_MACHINE_TEAM_REMOVER; // disable the machineTeamRemover actor
@@ -213,6 +235,9 @@ public:
 	double SQLITE_FRAGMENT_MIN_SAVINGS;
 	int SQLITE_CHUNK_SIZE_PAGES;
 	int SQLITE_CHUNK_SIZE_PAGES_SIM;
+	int SQLITE_READER_THREADS;
+	int SQLITE_WRITE_WINDOW_LIMIT;
+	double SQLITE_WRITE_WINDOW_SECONDS;
 
 	// KeyValueStoreSqlite spring cleaning
 	double SPRING_CLEANING_NO_ACTION_INTERVAL;
@@ -230,6 +255,15 @@ public:
 	// KeyValueStoreMemory
 	int64_t REPLACE_CONTENTS_BYTES;
 
+	// KeyValueStoreRocksDB
+	int ROCKSDB_BACKGROUND_PARALLELISM;
+	int ROCKSDB_READ_PARALLELISM;
+	int64_t ROCKSDB_MEMTABLE_BYTES;
+	bool ROCKSDB_UNSAFE_AUTO_FSYNC;
+	int64_t ROCKSDB_PERIODIC_COMPACTION_SECONDS;
+	int ROCKSDB_PREFIX_LEN;
+	int64_t ROCKSDB_BLOCK_CACHE_SIZE;
+
 	// Leader election
 	int MAX_NOTIFICATIONS;
 	int MIN_NOTIFICATIONS;
@@ -240,7 +274,7 @@ public:
 	double POLLING_FREQUENCY;
 	double HEARTBEAT_FREQUENCY;
 
-	// Master Proxy
+	// Commit CommitProxy
 	double START_TRANSACTION_BATCH_INTERVAL_MIN;
 	double START_TRANSACTION_BATCH_INTERVAL_MAX;
 	double START_TRANSACTION_BATCH_INTERVAL_LATENCY_FRACTION;
@@ -248,6 +282,8 @@ public:
 	double START_TRANSACTION_BATCH_QUEUE_CHECK_INTERVAL;
 	double START_TRANSACTION_MAX_TRANSACTIONS_TO_START;
 	int START_TRANSACTION_MAX_REQUESTS_TO_START;
+	double START_TRANSACTION_RATE_WINDOW;
+	double START_TRANSACTION_MAX_EMPTY_QUEUE_BUDGET;
 	int START_TRANSACTION_MAX_QUEUE_SIZE;
 	int KEY_LOCATION_MAX_QUEUE_SIZE;
 
@@ -265,7 +301,6 @@ public:
 	double COMMIT_BATCHES_MEM_FRACTION_OF_TOTAL;
 	double COMMIT_BATCHES_MEM_TO_TOTAL_MEM_SCALE_FACTOR;
 
-	double TRANSACTION_BUDGET_TIME;
 	double RESOLVER_COALESCE_TIME;
 	int BUGGIFIED_ROW_LIMIT;
 	double PROXY_SPIN_DELAY;
@@ -276,10 +311,18 @@ public:
 	double REQUIRED_MIN_RECOVERY_DURATION;
 	bool ALWAYS_CAUSAL_READ_RISKY;
 	int MAX_COMMIT_UPDATES;
-	double MIN_PROXY_COMPUTE;
 	double MAX_PROXY_COMPUTE;
+	double MAX_COMPUTE_PER_OPERATION;
 	int PROXY_COMPUTE_BUCKETS;
 	double PROXY_COMPUTE_GROWTH_RATE;
+	int TXN_STATE_SEND_AMOUNT;
+	double REPORT_TRANSACTION_COST_ESTIMATION_DELAY;
+	bool PROXY_REJECT_BATCH_QUEUED_TOO_LONG;
+
+	int RESET_MASTER_BATCHES;
+	int RESET_RESOLVER_BATCHES;
+	double RESET_MASTER_DELAY;
+	double RESET_RESOLVER_DELAY;
 
 	// Master Server
 	double COMMIT_SLEEP_TIME;
@@ -292,6 +335,8 @@ public:
 	double PROVISIONAL_START_DELAY;
 	double PROVISIONAL_DELAY_GROWTH;
 	double PROVISIONAL_MAX_DELAY;
+	double SECONDS_BEFORE_RECRUIT_BACKUP_WORKER;
+	double CC_INTERFACE_TIMEOUT;
 
 	// Resolver
 	int64_t KEY_BYTES_PER_SAMPLE;
@@ -304,6 +349,8 @@ public:
 	double BACKUP_TIMEOUT;  // master's reaction time for backup failure
 	double BACKUP_NOOP_POP_DELAY;
 	int BACKUP_FILE_BLOCK_BYTES;
+	int64_t BACKUP_LOCK_BYTES;
+	double BACKUP_UPLOAD_DELAY;
 
 	//Cluster Controller
 	double CLUSTER_CONTROLLER_LOGGING_DELAY;
@@ -339,9 +386,12 @@ public:
 	int EXPECTED_MASTER_FITNESS;
 	int EXPECTED_TLOG_FITNESS;
 	int EXPECTED_LOG_ROUTER_FITNESS;
-	int EXPECTED_PROXY_FITNESS;
+	int EXPECTED_COMMIT_PROXY_FITNESS;
+	int EXPECTED_GRV_PROXY_FITNESS;
 	int EXPECTED_RESOLVER_FITNESS;
 	double RECRUITMENT_TIMEOUT;
+	int DBINFO_SEND_AMOUNT;
+	double DBINFO_BATCH_DELAY;
 
 	//Move Keys
 	double SHARD_READY_DELAY;
@@ -369,8 +419,15 @@ public:
 
 	int64_t TARGET_BYTES_PER_STORAGE_SERVER;
 	int64_t SPRING_BYTES_STORAGE_SERVER;
+	int64_t AUTO_TAG_THROTTLE_STORAGE_QUEUE_BYTES;
 	int64_t TARGET_BYTES_PER_STORAGE_SERVER_BATCH;
 	int64_t SPRING_BYTES_STORAGE_SERVER_BATCH;
+	int64_t STORAGE_HARD_LIMIT_BYTES;
+	int64_t STORAGE_DURABILITY_LAG_HARD_MAX;
+	int64_t STORAGE_DURABILITY_LAG_SOFT_MAX;
+	
+	int64_t LOW_PRIORITY_STORAGE_QUEUE_BYTES;
+	int64_t LOW_PRIORITY_DURABILITY_LAG;
 
 	int64_t TARGET_BYTES_PER_TLOG;
 	int64_t SPRING_BYTES_TLOG;
@@ -381,8 +438,18 @@ public:
 	int64_t TLOG_RECOVER_MEMORY_LIMIT;
 	double TLOG_IGNORE_POP_AUTO_ENABLE_DELAY;
 
-	// disk snapshot
-	double SNAP_CREATE_MAX_TIMEOUT;
+	int64_t MAX_MANUAL_THROTTLED_TRANSACTION_TAGS;
+	int64_t MAX_AUTO_THROTTLED_TRANSACTION_TAGS;
+	double MIN_TAG_COST;
+	double AUTO_THROTTLE_TARGET_TAG_BUSYNESS;
+	double AUTO_THROTTLE_RAMP_TAG_BUSYNESS;
+	double AUTO_TAG_THROTTLE_RAMP_UP_TIME;
+	double AUTO_TAG_THROTTLE_DURATION;
+	double TAG_THROTTLE_PUSH_INTERVAL;
+	double AUTO_TAG_THROTTLE_START_AGGREGATION_TIME;
+	double AUTO_TAG_THROTTLE_UPDATE_FREQUENCY;
+	double TAG_THROTTLE_EXPIRED_CLEANUP_INTERVAL;
+	bool AUTO_TAG_THROTTLING_ENABLED;
 
 	double MAX_TRANSACTIONS_PER_BYTE;
 
@@ -398,6 +465,7 @@ public:
 	int MAX_TPS_HISTORY_SAMPLES;
 	int NEEDED_TPS_HISTORY_SAMPLES;
 	int64_t TARGET_DURABILITY_LAG_VERSIONS;
+	int64_t AUTO_TAG_THROTTLE_DURABILITY_LAG_VERSIONS;
 	int64_t TARGET_DURABILITY_LAG_VERSIONS_BATCH;
 	int64_t DURABILITY_LAG_UNLIMITED_THRESHOLD;
 	double INITIAL_DURABILITY_LAG_MULTIPLIER;
@@ -406,6 +474,10 @@ public:
 
 	double STORAGE_SERVER_LIST_FETCH_TIMEOUT;
 
+	// disk snapshot
+	int64_t MAX_FORKED_PROCESS_OUTPUT;
+	double SNAP_CREATE_MAX_TIMEOUT;
+
 	//Storage Metrics
 	double STORAGE_METRICS_AVERAGE_INTERVAL;
 	double STORAGE_METRICS_AVERAGE_INTERVAL_PER_KSECONDS;
@@ -413,6 +485,7 @@ public:
 	int64_t IOPS_UNITS_PER_SAMPLE;
 	int64_t BANDWIDTH_UNITS_PER_SAMPLE;
 	int64_t BYTES_READ_UNITS_PER_SAMPLE;
+	int64_t READ_HOT_SUB_RANGE_CHUNK_SIZE;
 	int64_t EMPTY_READ_PENALTY;
 	bool READ_SAMPLING_ENABLED;
 
@@ -426,9 +499,6 @@ public:
 	int FETCH_KEYS_PARALLELISM_BYTES;
 	int FETCH_KEYS_LOWER_PRIORITY;
 	int BUGGIFY_BLOCK_BYTES;
-	int64_t STORAGE_HARD_LIMIT_BYTES;
-	int64_t STORAGE_DURABILITY_LAG_HARD_MAX;
-	int64_t STORAGE_DURABILITY_LAG_SOFT_MAX;
 	double STORAGE_DURABILITY_LAG_REJECT_THRESHOLD;
 	double STORAGE_DURABILITY_LAG_MIN_RATE;
 	int STORAGE_COMMIT_BYTES;
@@ -447,6 +517,15 @@ public:
 	int BEHIND_CHECK_COUNT;
 	int64_t BEHIND_CHECK_VERSIONS;
 	double WAIT_METRICS_WRONG_SHARD_CHANCE;
+	int64_t MIN_TAG_READ_PAGES_RATE;
+	int64_t MIN_TAG_WRITE_PAGES_RATE;
+	double TAG_MEASUREMENT_INTERVAL;
+	int64_t READ_COST_BYTE_FACTOR;
+	bool PREFIX_COMPRESS_KVS_MEM_SNAPSHOTS;
+	bool REPORT_DD_METRICS;
+	double DD_METRICS_REPORT_INTERVAL;
+	double FETCH_KEYS_TOO_LONG_TIME_CRITERIA;
+	double MAX_STORAGE_COMMIT_TIME;
 
 	//Wait Failure
 	int MAX_OUTSTANDING_WAIT_FAILURE_REQUESTS;
@@ -454,11 +533,15 @@ public:
 
 	//Worker
 	double WORKER_LOGGING_INTERVAL;
-	double INCOMPATIBLE_PEER_DELAY_BEFORE_LOGGING;
 	double HEAP_PROFILER_INTERVAL;
 	double DEGRADED_RESET_INTERVAL;
 	double DEGRADED_WARNING_LIMIT;
 	double DEGRADED_WARNING_RESET_DELAY;
+	int64_t TRACE_LOG_FLUSH_FAILURE_CHECK_INTERVAL_SECONDS;
+	double TRACE_LOG_PING_TIMEOUT_SECONDS;
+	double MIN_DELAY_CC_WORST_FIT_CANDIDACY_SECONDS;  // Listen for a leader for N seconds, and if not heard, then try to become the leader.
+	double MAX_DELAY_CC_WORST_FIT_CANDIDACY_SECONDS;
+	double DBINFO_FAILED_DELAY;
 
 	// Test harness
 	double WORKER_POLL_DELAY;
@@ -475,6 +558,7 @@ public:
 	double MAX_STATUS_REQUESTS_PER_SECOND;
 	int CONFIGURATION_ROWS_TO_FETCH;
 	bool DISABLE_DUPLICATE_LOG_WARNING;
+	double HISTOGRAM_REPORT_INTERVAL;
 
 	// IPager
 	int PAGER_RESERVED_PAGES;
@@ -489,6 +573,7 @@ public:
 	int64_t TIME_KEEPER_MAX_ENTRIES;
 
 	// Fast Restore
+	// TODO: After 6.3, review FR knobs, remove unneeded ones and change default value
 	int64_t FASTRESTORE_FAILURE_TIMEOUT;
 	int64_t FASTRESTORE_HEARTBEAT_INTERVAL;
 	double FASTRESTORE_SAMPLING_PERCENT;
@@ -501,7 +586,7 @@ public:
 	// FASTRESTORE_VB_PARALLELISM is the number of concurrently running version batches
 	int64_t FASTRESTORE_VB_PARALLELISM;
 	int64_t FASTRESTORE_VB_MONITOR_DELAY; // How quickly monitor finished version batch
-	int64_t FASTRESTORE_VB_LAUNCH_DELAY;
+	double FASTRESTORE_VB_LAUNCH_DELAY;
 	int64_t FASTRESTORE_ROLE_LOGGING_DELAY;
 	int64_t FASTRESTORE_UPDATE_PROCESS_STATS_INTERVAL; // How quickly to update process metrics for restore
 	int64_t FASTRESTORE_ATOMICOP_WEIGHT; // workload amplication factor for atomic op
@@ -515,10 +600,50 @@ public:
 	int64_t FASTRESTORE_HEARTBEAT_DELAY; // interval for master to ping loaders and appliers
 	int64_t FASTRESTORE_HEARTBEAT_MAX_DELAY; // master claim a node is down if no heart beat from the node for this delay
 	int64_t FASTRESTORE_APPLIER_FETCH_KEYS_SIZE; // number of keys to fetch in a txn on applier
+	int64_t FASTRESTORE_LOADER_SEND_MUTATION_MSG_BYTES; // desired size of mutation message sent from loader to appliers
+	bool FASTRESTORE_GET_RANGE_VERSIONS_EXPENSIVE; // parse each range file to get (range, version) it has?
+	int64_t FASTRESTORE_REQBATCH_PARALLEL; // number of requests to wait on for getBatchReplies()
+	bool FASTRESTORE_REQBATCH_LOG; // verbose log information for getReplyBatches
+	int FASTRESTORE_TXN_CLEAR_MAX; // threshold to start tracking each clear op in a txn
+	int FASTRESTORE_TXN_RETRY_MAX; // threshold to start output error on too many retries
+	double FASTRESTORE_TXN_EXTRA_DELAY; // extra delay to avoid overwhelming fdb
+	bool FASTRESTORE_NOT_WRITE_DB; // do not write result to DB. Only for dev testing
+	bool FASTRESTORE_USE_RANGE_FILE; // use range file in backup
+	bool FASTRESTORE_USE_LOG_FILE; // use log file in backup
+	int64_t FASTRESTORE_SAMPLE_MSG_BYTES; // sample message desired size
+	double FASTRESTORE_SCHED_UPDATE_DELAY; // delay in seconds in updating process metrics
+	int FASTRESTORE_SCHED_TARGET_CPU_PERCENT; // release as many requests as possible when cpu usage is below the knob
+	int FASTRESTORE_SCHED_MAX_CPU_PERCENT; // max cpu percent when scheduler shall not release non-urgent requests
+	int FASTRESTORE_SCHED_INFLIGHT_LOAD_REQS; // number of inflight requests to load backup files
+	int FASTRESTORE_SCHED_INFLIGHT_SEND_REQS; // number of inflight requests for loaders to  send mutations to appliers
+	int FASTRESTORE_SCHED_LOAD_REQ_BATCHSIZE; // number of load request to release at once
+	int FASTRESTORE_SCHED_INFLIGHT_SENDPARAM_THRESHOLD; // we can send future VB requests if it is less than this knob
+	int FASTRESTORE_SCHED_SEND_FUTURE_VB_REQS_BATCH; // number of future VB sendLoadingParam requests to process at once
+	int FASTRESTORE_NUM_TRACE_EVENTS;
+	bool FASTRESTORE_EXPENSIVE_VALIDATION; // when set true, performance will be heavily affected
+	double FASTRESTORE_WRITE_BW_MB; // target aggregated write bandwidth from all appliers
+	double FASTRESTORE_RATE_UPDATE_SECONDS; // how long to update appliers target write rate
 
-	ServerKnobs(bool randomize = false, ClientKnobs* clientKnobs = NULL, bool isSimulated = false);
+	int REDWOOD_DEFAULT_PAGE_SIZE;  // Page size for new Redwood files
+	int REDWOOD_KVSTORE_CONCURRENT_READS;  // Max number of simultaneous point or range reads in progress.
+	int REDWOOD_COMMIT_CONCURRENT_READS;   // Max number of concurrent reads done to support commit operations
+	double REDWOOD_PAGE_REBUILD_FILL_FACTOR; // When rebuilding pages, start a new page after this capacity
+	int REDWOOD_LAZY_CLEAR_BATCH_SIZE_PAGES; // Number of pages to try to pop from the lazy delete queue and process at once
+	int REDWOOD_LAZY_CLEAR_MIN_PAGES;  // Minimum number of pages to free before ending a lazy clear cycle, unless the queue is empty
+	int REDWOOD_LAZY_CLEAR_MAX_PAGES;  // Maximum number of pages to free before ending a lazy clear cycle, unless the queue is empty
+	int64_t REDWOOD_REMAP_CLEANUP_WINDOW;  // Remap remover lag interval in which to coalesce page writes
+	double REDWOOD_REMAP_CLEANUP_LAG; // Maximum allowed remap remover lag behind the cleanup window as a multiple of the window size
+	double REDWOOD_LOGGING_INTERVAL;
+
+	// Server request latency measurement
+	int LATENCY_SAMPLE_SIZE;
+	double LATENCY_METRICS_LOGGING_INTERVAL;
+
+	ServerKnobs();
+	void initialize(bool randomize = false, ClientKnobs* clientKnobs = nullptr, bool isSimulated = false);
 };
 
+extern std::unique_ptr<ServerKnobs> globalServerKnobs;
 extern ServerKnobs const* SERVER_KNOBS;
 
 #endif

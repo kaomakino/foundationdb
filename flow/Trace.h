@@ -27,9 +27,11 @@
 #include <stdint.h>
 #include <string>
 #include <map>
+#include <set>
 #include <type_traits>
 #include "flow/IRandom.h"
 #include "flow/Error.h"
+#include "flow/ITrace.h"
 
 #define TRACE_DEFAULT_ROLL_SIZE (10 << 20)
 #define TRACE_DEFAULT_MAX_LOGS_SIZE (10 * TRACE_DEFAULT_ROLL_SIZE)
@@ -45,6 +47,9 @@ inline static bool TRACE_SAMPLE() { return false; }
 
 extern thread_local int g_allocation_tracing_disabled;
 
+// Each major level of severity has 10 levels of minor levels, which are not all
+// used. when the numbers of severity events in each level are counted, they are
+// grouped by the major level.
 enum Severity {
 	SevVerbose = 0,
 	SevSample = 1,
@@ -56,6 +61,8 @@ enum Severity {
 	SevMaxUsed = SevError,
 	SevMax = 1000000
 };
+
+const int NUM_MAJOR_LEVELS_OF_EVENTS = SevMaxUsed / 10 + 1;
 
 class TraceEventFields {
 public:
@@ -70,6 +77,8 @@ public:
 	size_t sizeBytes() const;
 	FieldIterator begin() const;
 	FieldIterator end() const;
+	bool isAnnotated() const;
+	void setAnnotated();
 
 	void addField(const std::string& key, const std::string& value);
 	void addField(std::string&& key, std::string&& value);
@@ -94,6 +103,7 @@ public:
 private:
 	FieldContainer fields;
 	size_t bytes;
+	bool annotated;
 };
 
 template <class Archive>
@@ -143,6 +153,7 @@ private:
 	std::vector<EventInfo> eventBatch;
 	std::vector<AttachInfo> attachBatch;
 	std::vector<BuggifyInfo> buggifyBatch;
+	static bool dumpImmediately();
 };
 
 struct DynamicEventMetric;
@@ -389,6 +400,7 @@ struct TraceEvent {
 	static bool isNetworkThread();
 
 	static double getCurrentTime();
+	static std::string printRealTime(double time);
 
 	//Must be called directly after constructing the trace event
 	TraceEvent& error(const class Error& e, bool includeCancelled=false) {
@@ -461,9 +473,13 @@ public:
 	// changed multiple times in a single event.
 	TraceEvent& setMaxFieldLength(int maxFieldLength);
 
+	int getMaxFieldLength() const;
+
 	// Sets the maximum event length before the event gets suppressed and a warning is logged. A value of 0 uses the default,
 	// a negative value disables length suppression. This should be called before adding details.
 	TraceEvent& setMaxEventLength(int maxEventLength);
+
+	int getMaxEventLength() const;
 
 	//Cannot call other functions which could disable the trace event afterwords
 	TraceEvent& suppressFor( double duration, bool logSuppressedEventCount=true );
@@ -474,6 +490,10 @@ public:
 		return enabled;
 	}
 
+	explicit operator bool() const {
+		return enabled;
+	}
+
 	void log();
 
 	~TraceEvent();  // Actually logs the event
@@ -481,7 +501,7 @@ public:
 	// Return the number of invocations of TraceEvent() at the specified logging level.
 	static unsigned long CountEventsLoggedAt(Severity);
 
-	DynamicEventMetric *tmpEventMetric;  // This just just a place to store fields
+	std::unique_ptr<DynamicEventMetric> tmpEventMetric; // This just just a place to store fields
 
 private:
 	bool initialized;
@@ -500,33 +520,14 @@ private:
 
 	void setSizeLimits();
 
-	static unsigned long eventCounts[5];
+	static unsigned long eventCounts[NUM_MAJOR_LEVELS_OF_EVENTS];
 	static thread_local bool networkThread;
 
 	bool init();
 	bool init( struct TraceInterval& );
 };
 
-struct ITraceLogWriter {
-	virtual void open() = 0;
-	virtual void roll() = 0;
-	virtual void close() = 0;
-	virtual void write(const std::string&) = 0;
-	virtual void sync() = 0;
-
-	virtual void addref() = 0;
-	virtual void delref() = 0;
-};
-
-struct ITraceLogFormatter {
-	virtual const char* getExtension() = 0;
-	virtual const char* getHeader() = 0; // Called when starting a new file
-	virtual const char* getFooter() = 0; // Called when ending a file
-	virtual std::string formatEvent(const TraceEventFields&) = 0; // Called for each event
-
-	virtual void addref() = 0;
-	virtual void delref() = 0;
-};
+class StringRef;
 
 struct TraceInterval {
 	TraceInterval( const char* type ) : count(-1), type(type), severity(SevInfo) {}
@@ -576,7 +577,8 @@ struct EventCacheHolder : public ReferenceCounted<EventCacheHolder> {
 #endif
 
 struct NetworkAddress;
-void openTraceFile(const NetworkAddress& na, uint64_t rollsize, uint64_t maxLogsSize, std::string directory = ".", std::string baseOfBase = "trace", std::string logGroup = "default");
+void openTraceFile(const NetworkAddress& na, uint64_t rollsize, uint64_t maxLogsSize, std::string directory = ".",
+                   std::string baseOfBase = "trace", std::string logGroup = "default", std::string identifier = "");
 void initTraceEventMetrics();
 void closeTraceFile();
 bool traceFileIsOpen();
@@ -596,6 +598,12 @@ bool validateTraceClockSource(std::string source);
 
 void addTraceRole(std::string role);
 void removeTraceRole(std::string role);
+void retrieveTraceLogIssues(std::set<std::string>& out);
+void setTraceLogGroup(const std::string& role);
+template <class T>
+struct Future;
+struct Void;
+Future<Void> pingTraceLogWriterThread();
 
 enum trace_clock_t { TRACE_CLOCK_NOW, TRACE_CLOCK_REALTIME };
 extern std::atomic<trace_clock_t> g_trace_clock;

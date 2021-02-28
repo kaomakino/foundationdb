@@ -103,32 +103,25 @@ struct BackupToDBCorrectnessWorkload : TestWorkload {
 			}
 		}
 
-		Reference<ClusterConnectionFile> extraFile(new ClusterConnectionFile(*g_simulator.extraDB));
+		auto extraFile = makeReference<ClusterConnectionFile>(*g_simulator.extraDB);
 		extraDB = Database::createDatabase(extraFile, -1);
 
 		TraceEvent("BARW_Start").detail("Locked", locked);
 	}
 
-	virtual std::string description() {
-		return "BackupToDBCorrectness";
-	}
+	std::string description() const override { return "BackupToDBCorrectness"; }
 
-	virtual Future<Void> setup(Database const& cx) {
-		return Void();
-	}
+	Future<Void> setup(Database const& cx) override { return Void(); }
 
-	virtual Future<Void> start(Database const& cx) {
+	Future<Void> start(Database const& cx) override {
 		if (clientId != 0)
 			return Void();
 		return _start(cx, this);
 	}
 
-	virtual Future<bool> check(Database const& cx) {
-		return true;
-	}
+	Future<bool> check(Database const& cx) override { return true; }
 
-	virtual void getMetrics(vector<PerfMetric>& m) {
-	}
+	void getMetrics(vector<PerfMetric>& m) override {}
 
 	ACTOR static Future<Void> diffRanges(Standalone<VectorRef<KeyRangeRef>> ranges, StringRef backupPrefix, Database src, Database dest) {
 		state int rangeIndex;
@@ -261,7 +254,7 @@ struct BackupToDBCorrectnessWorkload : TestWorkload {
 
 		// Stop the differential backup, if enabled
 		if (stopDifferentialDelay) {
-			TEST(!stopDifferentialFuture.isReady()); //Restore starts at specified time
+			TEST(!stopDifferentialFuture.isReady()); //Restore starts at specified time - stopDifferential not ready
 			wait(stopDifferentialFuture);
 			TraceEvent("BARW_DoBackupWaitToDiscontinue", randomID).detail("Tag", printable(tag)).detail("DifferentialAfter", stopDifferentialDelay);
 
@@ -270,7 +263,7 @@ struct BackupToDBCorrectnessWorkload : TestWorkload {
 				if (BUGGIFY) {
 					TraceEvent("BARW_DoBackupWaitForRestorable", randomID).detail("Tag", printable(tag));
 					// Wait until the backup is in a restorable state
-					state int resultWait = wait(backupAgent->waitBackup(cx, tag, false));
+					state EBackupState resultWait = wait(backupAgent->waitBackup(cx, tag, false));
 
 					TraceEvent("BARW_LastBackupFolder", randomID).detail("BackupTag", printable(tag))
 						.detail("LogUid", logUid).detail("WaitStatus", resultWait);
@@ -309,7 +302,7 @@ struct BackupToDBCorrectnessWorkload : TestWorkload {
 		UID _destUid = wait(backupAgent->getDestUid(cx, logUid));
 		self->destUid = _destUid;
 
-		state int statusValue = wait(backupAgent->waitBackup(cx, tag, true));
+		state EBackupState statusValue = wait(backupAgent->waitBackup(cx, tag, true));
 		wait(backupAgent->unlockBackup(cx, tag));
 
 		state std::string statusText;
@@ -339,6 +332,7 @@ struct BackupToDBCorrectnessWorkload : TestWorkload {
 
 			try {
 				tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
+				tr->setOption(FDBTransactionOptions::LOCK_AWARE);
 
 				// Check the left over tasks
 				// We have to wait for the list to empty since an abort and get status
@@ -360,7 +354,7 @@ struct BackupToDBCorrectnessWorkload : TestWorkload {
 					printf("%.6f %-10s Wait #%4d for %lld tasks to end\n", now(), randomID.toString().c_str(), waitCycles, (long long) taskCount);
 
 					wait(delay(5.0));
-					tr = Reference<ReadYourWritesTransaction>(new ReadYourWritesTransaction(cx));
+					tr = makeReference<ReadYourWritesTransaction>(cx);
 					int64_t _taskCount = wait( backupAgent->getTaskCount(tr) );
 					taskCount = _taskCount;
 
@@ -435,7 +429,7 @@ struct BackupToDBCorrectnessWorkload : TestWorkload {
 
 	ACTOR static Future<Void> _start(Database cx, BackupToDBCorrectnessWorkload* self) {
 		state DatabaseBackupAgent backupAgent(cx);
-		state DatabaseBackupAgent restoreAgent(self->extraDB);
+		state DatabaseBackupAgent restoreTool(self->extraDB);
 		state Future<Void> extraBackup;
 		state bool extraTasks = false;
 		TraceEvent("BARW_Arguments").detail("BackupTag", printable(self->backupTag)).detail("BackupAfter", self->backupAfter)
@@ -495,6 +489,9 @@ struct BackupToDBCorrectnessWorkload : TestWorkload {
 				state Transaction tr3(cx);
 				loop {
 					try {
+						// Run on the first proxy to ensure data is cleared
+						// when submitting the backup request below.
+						tr3.setOption(FDBTransactionOptions::COMMIT_ON_FIRST_PROXY);
 						for (auto r : self->backupRanges) {
 							if(!r.empty()) {
 								tr3.addReadConflictRange(r);
@@ -515,7 +512,7 @@ struct BackupToDBCorrectnessWorkload : TestWorkload {
 				}
 
 				try {
-					wait(restoreAgent.submitBackup(cx, self->restoreTag, restoreRange, true, StringRef(), self->backupPrefix, self->locked));
+					wait(restoreTool.submitBackup(cx, self->restoreTag, restoreRange, true, StringRef(), self->backupPrefix, self->locked));
 				}
 				catch (Error& e) {
 					TraceEvent("BARW_DoBackupSubmitBackupException", randomID).error(e).detail("Tag", printable(self->restoreTag));
@@ -523,8 +520,8 @@ struct BackupToDBCorrectnessWorkload : TestWorkload {
 						throw;
 				}
 
-				wait(success(restoreAgent.waitBackup(cx, self->restoreTag)));
-				wait(restoreAgent.unlockBackup(cx, self->restoreTag));
+				wait(success(restoreTool.waitBackup(cx, self->restoreTag)));
+				wait(restoreTool.unlockBackup(cx, self->restoreTag));
 			}
 
 			if (extraBackup.isValid()) {
@@ -541,9 +538,11 @@ struct BackupToDBCorrectnessWorkload : TestWorkload {
 
 				TraceEvent("BARW_AbortBackupExtra", randomID).detail("BackupTag", printable(self->backupTag));
 				try {
-					wait(backupAgent.abortBackup(self->extraDB, self->backupTag));
-				}
-				catch (Error& e) {
+					// This abort can race with submitBackup such that destUID may
+					// not be set yet. Adding "waitForDestUID" flag to avoid the race.
+					wait(backupAgent.abortBackup(self->extraDB, self->backupTag, /*partial=*/false,
+					                             /*abortOldBackup=*/false, /*dstOnly=*/false, /*waitForDestUID*/ true));
+				} catch (Error& e) {
 					TraceEvent("BARW_AbortBackupExtraException", randomID).error(e);
 					if (e.code() != error_code_backup_unneeded)
 						throw;
@@ -554,7 +553,7 @@ struct BackupToDBCorrectnessWorkload : TestWorkload {
 
 			if (self->performRestore) {
 				state UID restoreUid = wait(backupAgent.getLogUid(self->extraDB, self->restoreTag));
-				wait( checkData(cx, restoreUid, restoreUid, randomID, self->restoreTag, &restoreAgent, self->shareLogRange) );
+				wait( checkData(cx, restoreUid, restoreUid, randomID, self->restoreTag, &restoreTool, self->shareLogRange) );
 			}
 
 			TraceEvent("BARW_Complete", randomID).detail("BackupTag", printable(self->backupTag));
@@ -565,8 +564,9 @@ struct BackupToDBCorrectnessWorkload : TestWorkload {
 			}
 
 			// SOMEDAY: Remove after backup agents can exist quiescently
-			if ((g_simulator.drAgents == ISimulator::BackupToDB) && (!BackupToDBCorrectnessWorkload::drAgentRequests)) {
-				g_simulator.drAgents = ISimulator::NoBackupAgents;
+			if ((g_simulator.drAgents == ISimulator::BackupAgentType::BackupToDB) &&
+			    (!BackupToDBCorrectnessWorkload::drAgentRequests)) {
+				g_simulator.drAgents = ISimulator::BackupAgentType::NoBackupAgents;
 			}
 		}
 		catch (Error& e) {

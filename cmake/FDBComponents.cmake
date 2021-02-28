@@ -1,6 +1,12 @@
 set(FORCE_ALL_COMPONENTS OFF CACHE BOOL "Fails cmake if not all dependencies are found")
 
 ################################################################################
+# jemalloc
+################################################################################
+
+include(Jemalloc)
+
+################################################################################
 # Valgrind
 ################################################################################
 
@@ -12,25 +18,27 @@ endif()
 # SSL
 ################################################################################
 
-set(DISABLE_TLS OFF CACHE BOOL "Don't try to find LibreSSL and always build without TLS support")
+include(CheckSymbolExists)
+
+set(DISABLE_TLS OFF CACHE BOOL "Don't try to find OpenSSL and always build without TLS support")
 if(DISABLE_TLS)
   set(WITH_TLS OFF)
 else()
   set(OPENSSL_USE_STATIC_LIBS TRUE)
   find_package(OpenSSL)
-  if(NOT OPENSSL_FOUND)
-    set(LIBRESSL_USE_STATIC_LIBS TRUE)
-    find_package(LibreSSL)
-		if (LIBRESSL_FOUND)
-			add_library(OpenSSL::SSL ALIAS LibreSSL)
-		endif()
-  endif()
-	if(OPENSSL_FOUND OR LIBRESSL_FOUND)
+  if(OPENSSL_FOUND)
+    set(CMAKE_REQUIRED_INCLUDES ${OPENSSL_INCLUDE_DIR})
     set(WITH_TLS ON)
     add_compile_options(-DHAVE_OPENSSL)
+    check_symbol_exists("OPENSSL_INIT_NO_ATEXIT" "openssl/crypto.h" OPENSSL_HAS_NO_ATEXIT)
+    if(OPENSSL_HAS_NO_ATEXIT)
+      add_compile_options(-DHAVE_OPENSSL_INIT_NO_AT_EXIT)
+    else()
+      message(STATUS "Found OpenSSL without OPENSSL_INIT_NO_ATEXIT: assuming BoringSSL")
+    endif()
   else()
-    message(STATUS "Neither OpenSSL nor LibreSSL were found - Will compile without TLS Support")
-    message(STATUS "You can set OPENSSL_ROOT_DIR or LibreSSL_ROOT to the LibreSSL install directory to help cmake find it")
+    message(STATUS "OpenSSL was not found - Will compile without TLS Support")
+    message(STATUS "You can set OPENSSL_ROOT_DIR to help cmake find it")
     set(WITH_TLS OFF)
   endif()
   if(WIN32)
@@ -46,7 +54,8 @@ endif()
 set(WITH_JAVA OFF)
 find_package(JNI 1.8)
 find_package(Java 1.8 COMPONENTS Development)
-if(JNI_FOUND AND Java_FOUND AND Java_Development_FOUND)
+# leave FreeBSD JVM compat for later
+if(JNI_FOUND AND Java_FOUND AND Java_Development_FOUND AND NOT (CMAKE_SYSTEM_NAME STREQUAL "FreeBSD"))
   set(WITH_JAVA ON)
   include(UseJava)
   enable_language(Java)
@@ -100,6 +109,46 @@ if(GEM_EXECUTABLE)
   set(WITH_RUBY ON)
 endif()
 
+################################################################################
+# RocksDB
+################################################################################
+
+set(SSD_ROCKSDB_EXPERIMENTAL ON CACHE BOOL "Build with experimental RocksDB support")
+# RocksDB is currently enabled by default for GCC but does not build with the latest
+# Clang.
+if (SSD_ROCKSDB_EXPERIMENTAL AND GCC)
+  set(WITH_ROCKSDB_EXPERIMENTAL ON)
+else()
+  set(WITH_ROCKSDB_EXPERIMENTAL OFF)
+endif()
+
+################################################################################
+# TOML11
+################################################################################
+
+# TOML can download and install itself into the binary directory, so it should
+# always be available.
+find_package(toml11 QUIET)
+if(toml11_FOUND)
+  add_library(toml11_target INTERFACE)
+  add_dependencies(toml11_target INTERFACE toml11::toml11)
+else()
+  include(ExternalProject)
+
+  ExternalProject_add(toml11Project
+    URL "https://github.com/ToruNiina/toml11/archive/v3.4.0.tar.gz"
+    URL_HASH SHA256=bc6d733efd9216af8c119d8ac64a805578c79cc82b813e4d1d880ca128bd154d
+    CMAKE_CACHE_ARGS
+      -DCMAKE_INSTALL_PREFIX:PATH=${CMAKE_CURRENT_BINARY_DIR}/toml11
+      -Dtoml11_BUILD_TEST:BOOL=OFF
+    BUILD_ALWAYS ON)
+  add_library(toml11_target INTERFACE)
+  add_dependencies(toml11_target toml11Project)
+  target_include_directories(toml11_target SYSTEM INTERFACE ${CMAKE_CURRENT_BINARY_DIR}/toml11/include)
+endif()
+
+################################################################################
+
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/packages)
 add_custom_target(packages)
 
@@ -115,6 +164,7 @@ function(print_components)
   message(STATUS "Build Documentation (make html):      ${WITH_DOCUMENTATION}")
   message(STATUS "Build Bindings (depends on Python):   ${WITH_PYTHON}")
   message(STATUS "Configure CTest (depends on Python):  ${WITH_PYTHON}")
+  message(STATUS "Build with RocksDB:                   ${WITH_ROCKSDB_EXPERIMENTAL}")
   message(STATUS "=========================================")
 endfunction()
 

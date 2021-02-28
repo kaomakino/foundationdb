@@ -27,7 +27,8 @@
                   "storage",
                   "transaction",
                   "resolution",
-                  "proxy",
+                  "commit_proxy",
+                  "grv_proxy",
                   "master",
                   "test",
                   "storage_cache"
@@ -60,7 +61,8 @@
                   "role":{
                      "$enum":[
                         "master",
-                        "proxy",
+                        "commit_proxy",
+                        "grv_proxy",
                         "log",
                         "storage",
                         "resolver",
@@ -93,6 +95,11 @@
                      "counter":0,
                      "roughness":0.0
                   },
+                  "low_priority_queries":{
+                     "hz":0.0,
+                     "counter":0,
+                     "roughness":0.0
+                  },
                   "bytes_queried":{
                      "hz":0.0,
                      "counter":0,
@@ -113,6 +120,44 @@
                      "counter":0,
                      "roughness":0.0
                   },
+                  "grv_latency_statistics":{
+                     "default":{
+                         "count":0,
+                         "min":0.0,
+                         "max":0.0,
+                         "median":0.0,
+                         "mean":0.0,
+                         "p25":0.0,
+                         "p90":0.0,
+                         "p95":0.0,
+                         "p99":0.0,
+                         "p99.9":0.0
+                     }
+                  },
+                  "read_latency_statistics":{
+                     "count":0,
+                     "min":0.0,
+                     "max":0.0,
+                     "median":0.0,
+                     "mean":0.0,
+                     "p25":0.0,
+                     "p90":0.0,
+                     "p95":0.0,
+                     "p99":0.0,
+                     "p99.9":0.0
+                  },
+                  "commit_latency_statistics":{
+                     "count":0,
+                     "min":0.0,
+                     "max":0.0,
+                     "median":0.0,
+                     "mean":0.0,
+                     "p25":0.0,
+                     "p90":0.0,
+                     "p95":0.0,
+                     "p99":0.0,
+                     "p99.9":0.0
+                  },
                   "grv_latency_bands":{ // How many GRV requests belong to the latency (in seconds) band (e.g., How many requests belong to [0.01,0.1] latency band). The key is the upper bound of the band and the lower bound is the next smallest band (or 0, if none). Example: {0.01: 27, 0.1: 18, 1: 1, inf: 98,filtered: 10}, we have 18 requests in [0.01, 0.1) band.
                      "$map_key=upperBoundOfBand": 1
                   },
@@ -121,6 +166,13 @@
                   },
                   "commit_latency_bands":{
                      "$map_key=upperBoundOfBand": 1
+                  },
+                  "busiest_read_tag":{
+                     "tag": "",
+                     "fractional_cost": 0.0,
+                     "estimated_cost":{
+                        "hz":0.0
+                     }
                   }
                }
             ],
@@ -267,10 +319,23 @@
          "transactions_per_second_limit":0,
          "batch_released_transactions_per_second":0,
          "released_transactions_per_second":0,
+         "throttled_tags":{
+            "auto" : {
+                "busy_read" : 0,
+                "busy_write" : 0,
+                "count" : 0
+            },
+            "manual" : {
+                "count" : 0
+            },
+            "recommend" : {
+                "busy_read" : 0,
+                "busy_write" : 0,
+                "count" : 0
+            }
+         },
          "limiting_queue_bytes_storage_server":0,
          "worst_queue_bytes_storage_server":0,
-         "limiting_version_lag_storage_server":0,
-         "worst_version_lag_storage_server":0,
          "limiting_data_lag_storage_server":{
             "versions":0,
             "seconds":0.0
@@ -367,7 +432,9 @@
                   "layer_status_incomplete",
                   "database_availability_timeout",
                   "consistencycheck_suspendkey_fetch_timeout",
-                  "consistencycheck_disabled"
+                  "consistencycheck_disabled",
+                  "primary_dc_missing",
+                  "fetch_primary_dc_timeout"
                ]
             },
             "issues":[
@@ -384,8 +451,10 @@
          }
       ],
       "recovery_state":{
+         "seconds_since_last_recovered":1,
          "required_resolvers":1,
-         "required_proxies":1,
+         "required_commit_proxies":1,
+         "required_grv_proxies":1,
          "name":{ // "fully_recovered" is the healthy state; other states are normal to transition through but not to persist in
             "$enum":[
                "reading_coordinated_state",
@@ -423,6 +492,11 @@
                "roughness":0.0
             },
             "read_requests":{ // measures number of incoming read requests
+               "hz":0.0,
+               "counter":0,
+               "roughness":0.0
+            }, 
+             "low_priority_reads":{ // measures number of incoming low priority read requests
                "hz":0.0,
                "counter":0,
                "roughness":0.0
@@ -483,6 +557,11 @@
                "counter":0,
                "roughness":0.0
             },
+            "rejected_for_queued_too_long":{
+               "hz":0.0,
+               "counter":0,
+               "roughness":0.0
+            },
             "committed":{
                "hz":0.0,
                "counter":0,
@@ -499,6 +578,7 @@
       "data_distribution_disabled_for_ss_failures":true,
       "data_distribution_disabled_for_rebalance":true,
       "data_distribution_disabled":true,
+      "active_primary_dc":"pv",
       "configuration":{
          "log_anti_quorum":0,
          "log_replicas":2,
@@ -560,6 +640,7 @@
              "ssd-1",
              "ssd-2",
              "ssd-redwood-experimental",
+             "ssd-rocksdb-experimental",
              "memory"
          ]},
          "coordinators_count":1,
@@ -568,11 +649,11 @@
                "address":"10.0.4.1"
             }
          ],
-         "auto_proxies":3,
+         "auto_commit_proxies":3,
          "auto_resolvers":1,
          "auto_logs":3,
          "backup_worker_enabled":1,
-         "proxies":5 // this field will be absent if a value has not been explicitly set
+         "commit_proxies":5 // this field will be absent if a value has not been explicitly set
       },
       "data":{
          "least_operating_space_bytes_log_server":0,

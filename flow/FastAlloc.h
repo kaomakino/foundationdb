@@ -24,6 +24,7 @@
 
 #include "flow/Error.h"
 #include "flow/Platform.h"
+#include "flow/config.h"
 
 // ALLOC_INSTRUMENTATION_STDOUT enables non-sampled logging of all allocations and deallocations to stdout to be processed by tools/alloc_instrumentation.py
 //#define ALLOC_INSTRUMENTATION_STDOUT ENABLED(NOT_IN_CLEAN)
@@ -35,6 +36,7 @@
 #if VALGRIND
 #include <drd.h>
 #include <memcheck.h>
+bool valgrindPrecise();
 #endif
 
 #include "flow/Hash3.h"
@@ -118,6 +120,7 @@ public:
 	static volatile int32_t pageCount;
 #endif
 
+	FastAllocator()=delete;
 private:
 #ifdef VALGRIND
 	static unsigned long vLock;
@@ -133,7 +136,7 @@ private:
 	};
 	static thread_local ThreadData threadData;
 	static thread_local bool threadInitialized;
-	static GlobalData* globalData() {
+	static GlobalData* globalData() noexcept {
 #ifdef VALGRIND
 		ANNOTATE_RWLOCK_ACQUIRED(vLock, 1);
 #endif
@@ -147,7 +150,6 @@ private:
 	}
 	static void* freelist;
 
-	FastAllocator();  // not implemented
 	static void initThread();
 	static void getMagazine();
 	static void releaseMagazine(void*);
@@ -216,6 +218,7 @@ public:
 	if (size <= 2048) return FastAllocator<2048>::allocate();
 	if (size <= 4096) return FastAllocator<4096>::allocate();
 	if (size <= 8192) return FastAllocator<8192>::allocate();
+	if (size <= 16384) return FastAllocator<16384>::allocate();
 	return new uint8_t[size];
 }
 
@@ -231,6 +234,7 @@ inline void freeFast(int size, void* ptr) {
 	if (size <= 2048) return FastAllocator<2048>::release(ptr);
 	if (size <= 4096) return FastAllocator<4096>::release(ptr);
 	if (size <= 8192) return FastAllocator<8192>::release(ptr);
+	if (size <= 16384) return FastAllocator<16384>::release(ptr);
 	delete[](uint8_t*)ptr;
 }
 
